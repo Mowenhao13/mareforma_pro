@@ -1,0 +1,64 @@
+name: Publish mareforma-pro to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  # The pro project is released independently, but its upload is still gated on
+  # the repository test matrix. Core publishing ignores this tag namespace.
+  test:
+    if: startsWith(github.event.release.tag_name, 'mareforma-pro-v')
+    uses: ./.github/workflows/tests.yml
+
+  publish:
+    if: startsWith(github.event.release.tag_name, 'mareforma-pro-v')
+    needs: test
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for trusted publishing
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build
+        working-directory: mareforma-pro
+        run: python -m build
+
+      - name: Check dist
+        working-directory: mareforma-pro
+        run: python -m twine check dist/*
+
+      - name: Guard release tag matches built version
+        # `mareforma-pro-vX.Y.Z` carries the pro version only. It must match
+        # both the distribution metadata and the import package's __version__,
+        # because signing/export code reads the latter at runtime.
+        working-directory: mareforma-pro
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#mareforma-pro-v}"
+          WHEEL="$(ls dist/*.whl | head -1)"
+          BUILT="$(basename "$WHEEL" | sed -E 's/^mareforma_pro-([^-]+)-.*/\1/')"
+          INIT="$(sed -nE 's/^__version__ = "(.+)"$/\1/p' src/mareforma_pro/__init__.py)"
+          echo "release tag=$TAG  built version=$BUILT  __version__=$INIT"
+          if [ "$TAG" != "$BUILT" ] || [ "$TAG" != "$INIT" ]; then
+            echo "::error::Release tag '$GITHUB_REF_NAME' (version $TAG) does not match the built version $BUILT and __version__ $INIT. Bump mareforma-pro/pyproject.toml and mareforma-pro/src/mareforma_pro/__init__.py before tagging."
+            exit 1
+          fi
+
+      - name: Publish to PyPI
+        # pypa/gh-action-pypi-publish release/v1 — pinned 2026-05-12.
+        # `packages-dir` keeps this upload scoped to the pro project.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: mareforma-pro/dist/
+          skip-existing: true

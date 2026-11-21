@@ -12,3 +12,7 @@ include SECURITY.md
 global-exclude *.py[cod]
 global-exclude *.so
 prune tests/**/__pycache__
+# The pro/rootless observer is an independent distribution under its own
+# pyproject. It must not ride in the core `mareforma` sdist or wheel.
+prune mareforma_pro
+prune mareforma-pro

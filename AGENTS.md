@@ -20,6 +20,13 @@ is the only trust signal.
 uv add mareforma
 ```
 
+The rootless observer ships separately as `mareforma-pro` and imports as
+`mareforma_pro`; the core `mareforma` distribution does not include it:
+
+```bash
+uv add mareforma-pro
+```
+
 ## Core pattern
 
 ```python
@@ -126,6 +133,7 @@ project without enrolling anything.
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. When supplied, every signed-claim submit and every `refresh_unsigned()` re-fetches the entry and cryptographically verifies the RFC 6962 Merkle inclusion proof against the log's signed checkpoint. Verification failure refuses to mark the row `transparency_logged=1`. Supports Ed25519 (private Rekor) and ECDSA secp256r1 (Sigstore public-good); other curves and key types raise `RekorInclusionError(reason="unsupported_key")`. Mutually exclusive with `rekor_log_pubkey_path`. |
 | `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Filesystem path to a PEM file holding the Rekor log operator public key. Read once at open() time; equivalent to passing the file contents via `rekor_log_pubkey_pem`. Mutually exclusive with `rekor_log_pubkey_pem`. |
 | `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. Pass `"llm"` when an agent bootstraps its own project: an `llm` validator cannot sign off on a claim. |
+| `external_grounding_verifier` | callable \| None | `None` | Trusted verifier for a full external grounding receipt. It runs in the SDK parent and returns a minted `GroundingVerdict` or `None`; without one, a full external receipt is stored as `DECLARED` / `OPAQUE(unsigned_declared)`. |
 
 When `rekor_log_pubkey_pem` or `rekor_log_pubkey_path` is supplied, the
 key is persisted to `<project>/.mareforma/rekor_log_pubkey.pem` as a

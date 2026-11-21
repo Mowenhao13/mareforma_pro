@@ -767,3 +767,101 @@ mareforma mcp serve
 # Serve an explicit project, pinned for the process lifetime:
 mareforma mcp serve --project-root /path/to/project
 ```
+
+## mareforma-pro
+
+The optional rootless CLI has two transports. The default `run` path requires
+`strace` and a non-setuid `bwrap`. The alternate `run-fuse` path requires
+`/dev/fuse`, `fusermount3`, and `bwrap`, and uses no ptrace. Neither requires
+`sudo`, CAP_BPF, cgroups, or Tetragon.
+
+```bash
+uv add mareforma-pro
+```
+
+The distribution is `mareforma-pro` and the import package is
+`mareforma_pro`; it depends on and is released independently from core
+`mareforma`. The `otel` extra belongs to this distribution:
+
+```bash
+uv add "mareforma-pro[otel]"
+```
+
+### mareforma-pro doctor
+
+```bash
+mareforma-pro doctor --json
+```
+
+Reports `strace`, `bwrap`, Yama `ptrace_scope`, `/dev/fuse`, `fusermount3`, and
+a real `strace --seccomp-bpf -f` probe. A failed required check exits non-zero;
+the P2 FUSE probes are informational and do not fail a P1 host. This is a
+host-prerequisite check, not proof that a target's reads are trustworthy.
+
+### mareforma-pro run
+
+```bash
+mareforma-pro run \
+  --secret "$MAREFORMA_HMAC_SECRET" \
+  --cite /data/exp42/results.csv \
+  --ro-bind /data/exp42:/tmp/work \
+  -- /bin/cat /tmp/work/results.csv
+```
+
+Runs the command under `strace --seccomp-bpf -f -y`, parses successful reads
+separately from read-opens, signs a `mareforma_pro.rootless_receipt/v1` receipt,
+and prints the matching Mareforma grounding record. A cited file opened but not
+read is `OPAQUE(open_only)`; an unmapped temporary mount is
+`OPAQUE(unmapped_tmpfs)`; a rejected HMAC receipt is
+`OPAQUE(unsigned_declared)`.
+
+### mareforma-pro serve
+
+```bash
+mareforma-pro serve --socket /tmp/mareforma-collector.sock \
+  --secret "$MAREFORMA_HMAC_SECRET" --token "$MAREFORMA_COLLECTOR_TOKEN" \
+  --db /tmp/mareforma-receipts.sqlite \
+  --otel-jsonl /tmp/mareforma-spans.jsonl
+```
+
+Starts the local JSON-line Unix-socket collector. Operations are
+`open_scope`, `ingest_strace`, `ingest_events`, and `close_scope`. The socket is
+created `0600` and rejects a peer with a different Linux UID via `SO_PEERCRED`
+(pass `require_same_uid=False` in the Python API only when that boundary is
+intentional). The optional token is a second check. The HMAC secret stays in the
+parent/collector; target commands are launched with `bwrap --clearenv` by
+default. `--otel-jsonl` is optional; it emits non-authoritative scope/process
+spans on `close_scope`, and an export failure never changes a receipt.
+
+### mareforma-pro run-fuse
+
+```bash
+mareforma-pro run-fuse \
+  --secret "$MAREFORMA_HMAC_SECRET" \
+  --source /data/exp42 \
+  --cite /data/exp42/results.csv \
+  -- /bin/cat /tmp/mareforma-data/results.csv
+```
+
+Runs the command under a scope-specific, read-only FUSE view of `--source`,
+then binds that view into `bwrap` at `--sandbox-path` (default
+`/tmp/mareforma-data`). The direct host source path is shadowed by a tmpfs by
+default, so the FUSE view is the only route to the data inside the sandbox;
+pass `--keep-source-visible` only for debugging. The receipt says
+`collector_mode=fuse_read_proxy`, `evidence_level=USER_FUSE`, and
+`read_semantics=READ_BYTES`. A successful non-empty FUSE read grounds a cited
+host path; an open without a read is `OPAQUE(open_only)`. Because the receipt
+also signs `coverage_roots`, a citation outside `--source` is
+`OPAQUE(unmapped_sandbox_path)` rather than a confident `UNGROUNDED`.
+
+`fusermount3` is a setuid system helper used only to obtain the unprivileged
+mount. It does not grant the target root, and no `sudo` prompt is involved.
+
+### mareforma-pro demo
+
+```bash
+mareforma-pro demo --secret dev-only
+```
+
+Runs a local read and a write-only negative control. The demonstration is a
+smoke test, not a privileged kernel verification.

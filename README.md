@@ -155,6 +155,145 @@ uv add mareforma
 mareforma bootstrap   # optional: sign your claims and enable the public log
 ```
 
+## Rootless observation (`mareforma-pro`)
+
+For hosts where the user cannot obtain `sudo`, CAP_BPF, or a writable cgroup
+subtree, the separately released `mareforma-pro` distribution provides the
+`mareforma_pro` import package and a lower-assurance but fully user-space path.
+It depends on the core `mareforma` distribution and is versioned independently;
+releases use the `mareforma-pro-vX.Y.Z` tag namespace:
+
+```bash
+uv add mareforma-pro
+```
+
+Its default route wraps a non-setuid `bwrap` command in
+`strace --seccomp-bpf -f -y`, parses the syscall stream deterministically, and
+signs a domain-separated HMAC receipt. It does not need eBPF or Tetragon.
+
+```bash
+python -m mareforma_pro run \
+  --secret "$MAREFORMA_HMAC_SECRET" \
+  --cite /data/exp42/results.csv \
+  --ro-bind /data/exp42:/tmp/work \
+  -- /bin/cat /tmp/work/results.csv
+```
+
+An optional FUSE route covers hosts where ptrace is unavailable (`ptrace_scope=2`
+or a tool with its own conflicting seccomp policy). It uses the ordinary
+`fusermount3` helper to mount a scope-specific read-only view, then binds that
+view into `bwrap`. No `sudo`, ptrace, eBPF, or extra Python package is needed:
+
+```bash
+mareforma-pro run-fuse \
+  --secret "$MAREFORMA_HMAC_SECRET" \
+  --source /data/exp42 \
+  --cite /data/exp42/results.csv \
+  -- /bin/cat /tmp/mareforma-data/results.csv
+```
+
+The FUSE callback records a path in `opened_only` on open and in
+`observed_files` only after a non-empty read. The original host source path is
+shadowed by a tmpfs inside bwrap by default, so the mounted view is the only
+route to the data. The receipt carries `coverage_roots`; a citation outside the
+source root is `OPAQUE(unmapped_sandbox_path)`, not a confident `UNGROUNDED`.
+
+The result is a `mareforma_pro.rootless_receipt/v1` receipt. The SDK verifies
+the HMAC in the parent process and converts it into a normal Mareforma grounding
+record:
+
+```python
+from mareforma_pro import (
+    RootlessFuseRunner,
+    RootlessBwrapRunner,
+    RootlessCollector,
+    assert_claim_from_receipt,
+)
+
+collector = RootlessCollector(secret)
+result = RootlessBwrapRunner(collector).run_in_bwrap(
+    ["/bin/cat", "/tmp/work/results.csv"],
+    ro_binds={"/data/exp42": "/tmp/work"},
+)
+
+claim_id = assert_claim_from_receipt(
+    graph,
+    "The analysis read the cited results file",
+    receipt=result.evidence.to_receipt_dict(),
+    secret=secret,
+    cites="/data/exp42/results.csv",
+)
+```
+
+The FUSE runner has the same receipt bridge:
+
+```python
+fuse_run = RootlessFuseRunner(collector).run_in_bwrap(
+    ["/bin/cat", "/tmp/mareforma-data/results.csv"],
+    source_root="/data/exp42",
+)
+claim_id = assert_claim_from_receipt(
+    graph,
+    "The analysis read the cited results file through the FUSE view",
+    receipt=fuse_run.evidence.to_receipt_dict(),
+    secret=secret,
+    cites="/data/exp42/results.csv",
+)
+```
+
+If the graph is opened with a trusted `ReceiptVerifier`, core `assert_claim`
+also accepts the full external receipt directly:
+
+```python
+from mareforma_pro import ReceiptVerifier
+
+verifier = ReceiptVerifier(collector, cites="/data/exp42/results.csv")
+with mareforma.open(project, external_grounding_verifier=verifier) as graph:
+    graph.assert_claim(
+        "The analysis read the cited results file",
+        observed_grounding=result.evidence.to_receipt_dict(),
+    )
+```
+
+The parser distinguishes a successful `read` from an open that was never read.
+`opened_only` and `unmapped_tmpfs` are fail-closed diagnostics, not a claim that
+the bytes were consumed. A complete trace with a cited read is `GROUNDED`; a
+cited file opened but not read is `OPAQUE(open_only)`; an unmapped temporary
+mount is `OPAQUE(unmapped_tmpfs)`; a citation outside a FUSE receipt's
+`coverage_roots` is `OPAQUE(unmapped_sandbox_path)`; a tampered or unsigned
+receipt is `OPAQUE(unsigned_declared)`. A graph opened without a trusted
+`external_grounding_verifier` also stores a raw external receipt as
+`DECLARED` / `OPAQUE(unsigned_declared)` rather than trusting its contents.
+
+The HMAC authenticates a receipt across the process boundary; it is not a
+defense against code that can read the collector secret in the parent. Keep the
+secret out of the target process and launch it with `bwrap --clearenv` (the
+runner's default).
+
+A collector can emit non-authoritative scope and process spans on every
+`close_scope` by passing `span_exporter=AsyncJsonlSpanExporter(...)`; the CLI
+exposes the same path as `mareforma-pro serve --otel-jsonl ...`. Export failure
+never changes a receipt.
+
+Jupyter and MCP hooks use application-level Python audit events and are labelled
+`APPLICATION_PYTHON_AUDIT` / `APPLICATION_MCP`. They never become eBPF evidence;
+a third-party MCP response is additionally marked `external_mcp`. OTel export is
+non-authoritative and cannot change a verdict.
+
+The rootless path is not a replacement for kernel evidence when the claim needs
+it: `strace` is ptrace-based, can be detected or restricted by the target, and
+does not cover every read channel (for example mmap or io_uring). Use it when
+the threat model accepts that boundary. A deployment that needs stronger
+coverage must add a separate kernel-tracing sidecar; this package does not
+silently claim that coverage.
+
+The FUSE route has its own explicit boundary: it observes reads through the
+mounted view of one source directory, not unrelated host filesystem activity.
+It is not a proof that a process never read another path; it is a proof that a
+cited read crossed this scope's controlled view. Keep the source root narrow
+and use a stronger kernel observer when the threat model requires host-wide
+coverage.
+
 ## Capabilities
 
 | What you get | What it does |

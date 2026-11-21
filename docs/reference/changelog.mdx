@@ -7,6 +7,40 @@ The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma
 This page mirrors it section for section from v0.3.1 on. v0.3.0 and the
 0.2.x line are summarized here; read CHANGELOG.md for their full entries.
 
+## Unreleased
+
+### Added
+
+- **Independent `mareforma-pro` distribution.** The rootless extension now
+  ships from its own `mareforma-pro` project with the `mareforma_pro` import
+  package and `mareforma-pro` entry point. It declares core
+  `mareforma>=0.4.0` as a dependency and is versioned separately; the core
+  `mareforma` wheel and sdist no longer contain the extension. Its release
+  workflow publishes on the independent `mareforma-pro-vX.Y.Z` tag namespace.
+- **Rootless `mareforma_pro` observer.** A no-sudo path wraps non-setuid
+  `bwrap` in `strace --seccomp-bpf -f -y`, parses successful read syscalls
+  separately from read-opens, and signs a domain-separated HMAC receipt. It
+  adds no eBPF, cgroup, or privileged daemon dependency.
+- **Fail-closed rootless diagnostics.** `opened_only`, `unmapped_tmpfs`,
+  `trace_incomplete`, and tampered/unsigned receipts cannot become GROUNDED.
+  The new `GroundingVerdict` fields carry `opaque_reasons`, `read_semantics`,
+  and `evidence_level` only when set, leaving pre-existing receipts unchanged.
+- **Local collector and application hooks.** The rootless collector exposes
+  open/ingest/close over a Unix socket, optional SQLite receipts, Jupyter audit
+  hooks, MCP `_meta` correlation, and non-authoritative JSONL/OTLP telemetry.
+- **Optional rootless FUSE transport.** `FuseReadOnlyProxy` speaks the Linux
+  `/dev/fuse` protocol directly and uses `fusermount3` only for the
+  unprivileged mount. `RootlessFuseRunner` binds the read-only view into
+  `bwrap` without ptrace. Receipts carry `USER_FUSE` / `READ_BYTES`, a signed
+  `coverage_roots` bound, and fail closed to `OPAQUE(unmapped_sandbox_path)`
+  for citations outside the view. No extra dependency is required.
+- **`mareforma-pro` CLI.** `doctor`, `run`, `run-fuse`, `serve`, and `demo`
+  cover the zero-privilege paths without claiming kernel-level coverage.
+- **`external_grounding_verifier` on `mareforma.open()`.** A trusted parent
+  process can verify a full external receipt and mint the normal grounding
+  verdict. Without one, a raw external receipt is stored as
+  `DECLARED`/`OPAQUE(unsigned_declared)`, never as `GROUNDED`.
+
 ## v0.4.0
 
 Schema version 2. **This release is a one-way door for a project.** A graph it

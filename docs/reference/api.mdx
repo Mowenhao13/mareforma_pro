@@ -34,6 +34,7 @@ with mareforma.open() as graph:
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. Opts the session into RFC 6962 Merkle inclusion-proof verification: every signed-claim submit and every `refresh_unsigned()` re-fetches the entry and cryptographically verifies the audit path against the log's signed checkpoint. Verification failure refuses to mark `transparency_logged=1`. Supports Ed25519 + ECDSA secp256r1; other curves raise `RekorInclusionError(reason="unsupported_key")`. Mutually exclusive with `rekor_log_pubkey_path`. The supplied PEM persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin. |
 | `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Filesystem path to a PEM file holding the Rekor log operator public key. Read once at open() time; equivalent to passing the bytes via `rekor_log_pubkey_pem`. Mutually exclusive with `rekor_log_pubkey_pem`. |
 | `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. An LLM-typed validator can sign a validation envelope, and recording one on a claim is refused. |
+| `external_grounding_verifier` | callable \| None | `None` | Trusted verifier for a full external grounding receipt. It runs in the SDK parent and returns a minted `GroundingVerdict` or `None`. If absent or rejecting, a full external receipt is stored as `DECLARED` / `OPAQUE(unsigned_declared)`; it cannot read as GROUNDED. |
 
 **Returns** `EpistemicGraph`
 
@@ -1331,7 +1332,8 @@ verdict attests what the process saw, not the honesty of the code it watched.
 
 The computed verdict plus its receipt. Fields: `grounding` (an `ObservedGrounding`
 member), `reason` (str), `cited_sources`, `grounded_sources`, `reads`, `seams`,
-`matched_identifier`, `version`, `reads_seen`, `opens_detected`, `model_lineage`.
+`matched_identifier`, `version`, `reads_seen`, `opens_detected`, `model_lineage`,
+`opaque_reasons`, `read_semantics`, and `evidence_level`.
 
 - `grounded_sources` is the cited sources a matching non-empty read was actually
   observed for: the subset of `cited_sources` that the read-side binding gate
@@ -1343,6 +1345,18 @@ member), `reason` (str), `cited_sources`, `grounded_sources`, `reads`, `seams`,
   its digest. See the `model_lineage` row in
   [Data model](/reference/data-model) for the stored shape.
 
+- `opaque_reasons` is a tuple of named blind spots emitted by an external
+  collector (for example `open_only`, `unmapped_tmpfs`,
+  `unmapped_sandbox_path`, or `trace_incomplete`). It is empty for the
+  built-in in-process observer.
+- `read_semantics` names what the evidence means (`READ_INTENT` for a trace
+  that observed a read syscall; `READ_BYTES` for a non-empty FUSE read; and
+  `OPEN_INTENT` for an application-level open).
+- `evidence_level` names the evidence source (`USER_TRACE` for the rootless
+  strace collector; `USER_FUSE` for the FUSE read-only proxy;
+  `APPLICATION_PYTHON_AUDIT` / `APPLICATION_MCP` for hooks).
+  These three fields are omitted from the receipt and signed record when unset,
+  so pre-existing receipts keep their exact bytes and digest.
 - `grounding` is `ObservedGrounding.GROUNDED` / `UNGROUNDED` / `OPAQUE`.
 - `receipt()` returns the full canonicalizable evidence; `receipt_digest()` is its
   `sha256:` digest.
@@ -1350,7 +1364,9 @@ member), `reason` (str), `cited_sources`, `grounded_sources`, `reads`, `seams`,
   of `receipt()`. It does not restore `model_lineage`: the receipt does not carry
   the lineage, so a verdict read back from a persisted receipt has `None` there.
 - `to_signed_dict()` is the compact `{version, grounding, reason, cited_sources,
-  grounded_sources, receipt_digest}` record bound into the signed statement.
+  grounded_sources, receipt_digest}` record bound into the signed statement. It
+  adds `opaque_reasons`, `read_semantics`, and `evidence_level` only when they
+  were supplied by an external observer.
   mareforma binds the digest, not the receipt, so a caller that keeps the receipt
   out of band can detect mutation.
 - `read_coverage_fraction()` is `reads_seen / opens_detected`, both counted over
@@ -1613,3 +1629,117 @@ stored record, or `None`). A finding whose verdict is not `GROUNDED` reads
 else; a claim asserted without a verdict is
 unaffected and its signed bytes are identical to a pre-observer claim. Asserting a
 claim while an `observe()` scope is still open raises.
+
+### Optional rootless extension (`mareforma_pro`)
+
+`mareforma_pro` is installed by the independently released `mareforma-pro`
+distribution, which depends on core `mareforma`. The distribution name and the
+import name intentionally differ:
+
+```bash
+uv add mareforma-pro
+```
+
+It is a separate, no-sudo extension. It does not replace the in-process
+observer and does not turn application-level hooks into kernel evidence.
+
+```python
+from mareforma_pro import RootlessCollector, RootlessBwrapRunner, verify_and_verdict
+
+collector = RootlessCollector(secret)
+run = RootlessBwrapRunner(collector).run_in_bwrap(
+    ["/bin/cat", "/tmp/work/results.csv"],
+    ro_binds={"/data/exp42": "/tmp/work"},
+)
+verdict = verify_and_verdict(
+    run.evidence.to_receipt_dict(),
+    secret=secret,
+    cites="/data/exp42/results.csv",
+)
+```
+
+The optional FUSE transport uses the same receipt and verifier bridge. It
+requires no ptrace and is selected when the host forbids `strace` or a target
+has an incompatible seccomp policy:
+
+```python
+from mareforma_pro import RootlessCollector, RootlessFuseRunner
+
+fuse_run = RootlessFuseRunner(collector).run_in_bwrap(
+    ["/bin/cat", "/tmp/mareforma-data/results.csv"],
+    source_root="/data/exp42",
+)
+verdict = verify_and_verdict(
+    fuse_run.evidence.to_receipt_dict(),
+    secret=secret,
+    cites="/data/exp42/results.csv",
+)
+```
+
+`FuseReadOnlyProxy` is also available directly for an existing collector
+scope. It speaks the Linux `/dev/fuse` protocol directly, so the package needs
+no libfuse binding or extra install; the system `fusermount3` helper only
+performs the unprivileged mount. The proxy records `opened_only` on a
+successful open and `observed_files` only when a FUSE read returns non-empty
+bytes. Write operations return `EROFS`.
+
+`verify_and_verdict()` verifies the receipt HMAC in the SDK parent, converts
+the evidence into a minted `GroundingVerdict`, and returns the normal compact
+signed record through `to_signed_dict()`. `assert_claim_from_receipt()` performs
+the same verification and asserts in one call. A raw external record passed to
+core `assert_claim()` without this verifier is still treated as `DECLARED`; that
+is deliberate, because the core cannot verify an HMAC it was not given a key
+for.
+
+A graph can be opened with a trusted verifier when the integration wants the
+full external receipt accepted directly:
+
+```python
+from mareforma_pro import ReceiptVerifier
+
+verifier = ReceiptVerifier(collector, cites="/data/exp42/results.csv")
+with mareforma.open(project, external_grounding_verifier=verifier) as graph:
+    graph.assert_claim(
+        "The analysis read the cited results file",
+        observed_grounding=run.evidence.to_receipt_dict(),
+    )
+```
+
+The verifier runs in the SDK parent and returns a minted verdict; if it rejects
+the receipt, core still degrades the record to `DECLARED`.
+
+`ScopeEvidence` separates `observed_files` (a successful read syscall or an
+explicit application read event) from `opened_only` (an open for reading with no
+observed read). `opaque_reasons` is carried on the verdict and into the signed
+record only when non-empty. Rootless `strace` is `USER_TRACE` with
+`READ_INTENT`; FUSE is `USER_FUSE` with `READ_BYTES` and
+`collector_mode=fuse_read_proxy`; Jupyter is `APPLICATION_PYTHON_AUDIT` with
+`OPEN_INTENT`; MCP is `APPLICATION_MCP`. A third-party MCP response records a
+payload SHA-256 and remains `OPAQUE(external_mcp)`. The digest is audit material
+for comparing the response a caller retained; it is not an automatic semantic
+check that a claim's text matches the response.
+
+A FUSE receipt also carries `coverage_roots`, the host paths that view could
+observe. A citation under one of those roots but absent from `observed_files`
+can still be `UNGROUNDED`; a citation outside every root is
+`OPAQUE(unmapped_sandbox_path)`, because that backend never had the chance to
+see it. `RootlessFuseRunner` shadows the original host source path with a tmpfs
+inside `bwrap` by default, so the mounted view is the only in-sandbox route to
+the data.
+
+The HMAC is a process-boundary integrity check, not a defense against code in
+the parent that can read the secret. The runner's default `bwrap --clearenv`
+keeps it out of the target's environment.
+
+The collector's local Unix-socket protocol has four operations:
+`open_scope`, `ingest_strace`, `ingest_events`, and `close_scope`. The socket is
+created with mode `0600` and, on Linux, checks `SO_PEERCRED` so a connection
+from another UID is rejected; `require_same_uid=False` is the explicit opt-out.
+An optional bearer token adds a second local check. Receipts can be persisted
+with `ReceiptStore`. `scope_span_from_evidence()` projects one scope span;
+`process_spans_from_evidence()` adds deterministic child spans from the
+`execve`/`clone` tree for a consumer that renders nesting. Pass a
+`span_exporter=` to `RootlessCollector` and it emits those spans on
+`close_scope`; `AsyncJsonlSpanExporter` is the built-in non-authoritative
+projection. A failed export is swallowed and never changes a receipt or
+grounding verdict.

@@ -20,6 +20,17 @@ uv sync --extra dev   # or: python -m venv .venv && . .venv/bin/activate && pip 
 uv run pytest         # full suite must pass before any commit
 ```
 
+The independently released `mareforma-pro` distribution lives in
+`mareforma-pro/` and has its own suite:
+
+```bash
+uv pip install -e "./mareforma-pro[dev]"
+uv run --no-sync pytest mareforma-pro/tests
+```
+
+Its releases use `mareforma-pro-vX.Y.Z` tags and publish only that project;
+core releases keep the `vX.Y.Z` tag namespace.
+
 Add `--extra mcp` if you touch the Model Context Protocol server. Its tests
 skip without the SDK installed, so without that extra the suite passes while
 `tests/test_mcp_server.py` never runs. CI covers it on one pinned leg.

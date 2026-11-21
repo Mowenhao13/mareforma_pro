@@ -225,10 +225,17 @@ class GroundingVerdict:
     # or its digest: the identity rides the evidence line, not the
     # grounding envelope, so a pre-observer receipt digest is unchanged.
     model_lineage: "ModelLineage | None" = None
+    # External-evidence diagnostics. They stay empty/None for the built-in
+    # in-process observer, so every pre-existing receipt and signed digest is
+    # byte-for-byte unchanged. A collector-backed observer can name why an
+    # observation is incomplete without overloading the reason string.
+    opaque_reasons: tuple[str, ...] = ()
+    read_semantics: str | None = None
+    evidence_level: str | None = None
 
     def receipt(self) -> dict:
         """The full, canonicalizable receipt of what the observer captured."""
-        return {
+        receipt = {
             "version": self.version,
             "grounding": self.grounding.value,
             "reason": self.reason,
@@ -250,6 +257,13 @@ class GroundingVerdict:
                 "opens_detected": self.opens_detected,
             },
         }
+        if self.opaque_reasons:
+            receipt["opaque_reasons"] = list(self.opaque_reasons)
+        if self.read_semantics is not None:
+            receipt["read_semantics"] = self.read_semantics
+        if self.evidence_level is not None:
+            receipt["evidence_level"] = self.evidence_level
+        return receipt
 
     def receipt_digest(self) -> str:
         """``sha256:<hex>`` over the canonical receipt bytes.
@@ -281,7 +295,7 @@ class GroundingVerdict:
         time, not this call's output (see :func:`_mint`), so serializing has no
         say in provenance and cannot be made to have one.
         """
-        return {
+        signed = {
             "version": self.version,
             "grounding": self.grounding.value,
             "reason": self.reason,
@@ -289,6 +303,13 @@ class GroundingVerdict:
             "grounded_sources": list(self.grounded_sources),
             "receipt_digest": self.receipt_digest(),
         }
+        if self.opaque_reasons:
+            signed["opaque_reasons"] = list(self.opaque_reasons)
+        if self.read_semantics is not None:
+            signed["read_semantics"] = self.read_semantics
+        if self.evidence_level is not None:
+            signed["evidence_level"] = self.evidence_level
+        return signed
 
     @classmethod
     def from_receipt(cls, receipt: dict) -> "GroundingVerdict":
@@ -330,6 +351,9 @@ class GroundingVerdict:
             version=receipt.get("version", GROUNDING_AXIS_VERSION),
             reads_seen=as_int(cov.get("reads_seen")),
             opens_detected=as_int(cov.get("opens_detected")),
+            opaque_reasons=tuple(receipt.get("opaque_reasons") or ()),
+            read_semantics=receipt.get("read_semantics"),
+            evidence_level=receipt.get("evidence_level"),
         )
 
     def read_coverage_fraction(self) -> float | None:
@@ -546,4 +570,51 @@ def declared_record(record: dict) -> dict:
     reason = reason if isinstance(reason, str) else ""
     if DECLARED_ANNOTATION not in reason:
         out["reason"] = f"{reason} {DECLARED_ANNOTATION}".strip()
+    return out
+
+
+def looks_like_external_evidence(record: object) -> bool:
+    """True for a full external evidence receipt, not a compact verdict record.
+
+    A collector receipt carries its own schema and scope but no ``grounding``
+    state: the verdict is computed in the SDK parent after HMAC verification.
+    Keeping this shape test in one place lets the write path fail closed when
+    no trusted verifier accepted the record, without treating a malformed
+    compact verdict as an external receipt.
+    """
+    return (
+        isinstance(record, dict)
+        and isinstance(record.get("schema_version"), str)
+        and isinstance(record.get("scope_id"), str)
+        and bool(record.get("scope_id"))
+        and "grounding" not in record
+    )
+
+
+def declared_external_record(record: dict, *, reason: str | None = None) -> dict:
+    """Mark an unverified external receipt as a declared, blind observation.
+
+    The record is kept as supplied for audit, but it cannot keep any read claim
+    it might imply: the grounding state becomes ``OPAQUE``, the provenance is
+    ``DECLARED``, and ``unsigned_declared`` names why the write path would not
+    trust it. No receipt digest survives, so this record cannot be mistaken for
+    one the observer minted.
+    """
+    out = dict(record)
+    out["provenance"] = DECLARED_PROVENANCE
+    out["grounding"] = ObservedGrounding.OPAQUE.value
+    out["reason"] = (
+        reason
+        or "the external grounding receipt was not verified by a trusted verifier"
+    )
+    out["grounded_sources"] = []
+    out.pop("receipt_digest", None)
+    reasons = [
+        item
+        for item in (out.get("opaque_reasons") or ())
+        if isinstance(item, str) and item
+    ]
+    if "unsigned_declared" not in reasons:
+        reasons.append("unsigned_declared")
+    out["opaque_reasons"] = reasons
     return out

@@ -9,9 +9,11 @@ jobs:
   # rendering only. Run the same matrix a push runs and hold the upload behind
   # it, so a release cut from a red commit fails before it ships.
   test:
+    if: startsWith(github.event.release.tag_name, 'v')
     uses: ./.github/workflows/tests.yml
 
   publish:
+    if: startsWith(github.event.release.tag_name, 'v')
     needs: test
     runs-on: ubuntu-latest
     environment: pypi

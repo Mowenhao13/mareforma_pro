@@ -179,6 +179,7 @@ class EpistemicGraph:
         rekor_log_pubkey_pem: bytes | None = None,
         rekor_key_provenance: str | None = None,
         validator_type: str = "human",
+        external_grounding_verifier: object | None = None,
     ) -> None:
         self._conn = conn
         self._root = root
@@ -192,6 +193,7 @@ class EpistemicGraph:
         # must not race on transaction ownership.
         self._lock = threading.RLock()
         self._signer = signer
+        self._external_grounding_verifier = external_grounding_verifier
         self._rekor_url = rekor_url
         self._require_rekor = require_rekor
         # The session opt-in for a private Rekor on a non-public address.
@@ -2243,8 +2245,7 @@ class EpistemicGraph:
             }
         )
 
-    @staticmethod
-    def _attest_grounding(supplied, record: dict) -> dict:
+    def _attest_grounding(self, supplied, record: dict) -> dict:
         """The observed-grounding record to STORE, taken from the observer.
 
         ``supplied`` is what the caller handed in (a verdict object on the
@@ -2265,6 +2266,10 @@ class EpistemicGraph:
           ``obs.verdict.to_signed_dict()`` call): the OBSERVER'S record for that
           digest is stored, not the caller's copy, so a hand-edited state on a
           real digest is discarded rather than signed;
+        - a full external receipt with no local digest: the graph's trusted
+          ``external_grounding_verifier`` may accept it and mint a verdict. A
+          rejection is still a declaration, and a full receipt is neutralised
+          to ``OPAQUE(unsigned_declared)`` rather than stored with no state;
         - anything else: a declaration. It is marked and its GROUNDED claim is
           neutralised (see :func:`~mareforma.observe._verdict.declared_record`).
 
@@ -2284,7 +2289,11 @@ class EpistemicGraph:
         re-signed by the producer's own key and restored as GROUNDED.
         """
         from mareforma.observe._verdict import (
+            GroundingVerdict,
+            _mint,
+            declared_external_record,
             declared_record,
+            looks_like_external_evidence,
             minted_record,
             minted_snapshot,
         )
@@ -2293,7 +2302,30 @@ class EpistemicGraph:
         if snapshot is not None:
             return snapshot
         observed = minted_record(record)
-        return observed if observed is not None else declared_record(record)
+        if observed is not None:
+            return observed
+        verifier_error: str | None = None
+        verifier = self._external_grounding_verifier
+        if verifier is not None:
+            try:
+                external = verifier(record)
+            except Exception as exc:  # noqa: BLE001 - fail closed, keep the reason
+                external = None
+                verifier_error = f"{type(exc).__name__}: {exc}"
+            if external is not None and isinstance(external, GroundingVerdict):
+                snapshot = minted_snapshot(external)
+                if snapshot is None:
+                    snapshot = minted_snapshot(_mint(external))
+                if snapshot is not None:
+                    return snapshot
+        if looks_like_external_evidence(record):
+            reason = "the external grounding receipt was not verified in this process"
+            if verifier_error is not None:
+                reason += f" (verifier rejected it: {verifier_error})"
+            elif verifier is not None:
+                reason += " (the configured verifier rejected it)"
+            return declared_external_record(record, reason=reason)
+        return declared_record(record)
 
     @staticmethod
     def _annotate_unbound(record: dict) -> dict:

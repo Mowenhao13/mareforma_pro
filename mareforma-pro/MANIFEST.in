@@ -1,0 +1,5 @@
+graft tests
+include README.md
+include LICENSE
+global-exclude *.py[cod]
+prune tests/**/__pycache__

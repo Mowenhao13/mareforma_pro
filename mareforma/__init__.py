@@ -46,6 +46,7 @@ def open(  # noqa: A001
     rekor_log_pubkey_pem: "bytes | None" = None,
     rekor_log_pubkey_path: "str | Path | None" = None,
     validator_type: str = "human",
+    external_grounding_verifier: "object | None" = None,
 ) -> "EpistemicGraph":
     """Open the epistemic graph at *path* and return an EpistemicGraph.
 
@@ -115,6 +116,11 @@ def open(  # noqa: A001
         ``'llm'``: an ``llm`` validator cannot sign off on a claim. The
         default is ``'human'`` for compatibility, and a
         defaulted type carries no weight on the trust map's independence axis.
+    external_grounding_verifier:
+        Optional trusted callable used by ``assert_claim``/``assert_finding``
+        to verify a full external grounding receipt. It runs in this process
+        and returns a minted ``GroundingVerdict`` or ``None``. Core remains
+        fail-closed when it is absent or rejects the record.
 
     Returns
     -------
@@ -352,6 +358,7 @@ def open(  # noqa: A001
             rekor_log_pubkey_pem=rekor_log_pubkey_pem,
             rekor_key_provenance=rekor_key_provenance,
             validator_type=validator_type,
+            external_grounding_verifier=external_grounding_verifier,
         )
     except BaseException:
         conn.close()

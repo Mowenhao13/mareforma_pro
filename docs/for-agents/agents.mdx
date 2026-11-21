@@ -30,6 +30,17 @@ is the only trust signal.
 uv add mareforma
 ```
 
+On hosts without `sudo`, the independently released `mareforma-pro`
+distribution provides the `mareforma_pro` import package and two local
+transports: `strace + bwrap` and a ptrace-free FUSE view. Both sign an HMAC
+`ScopeEvidence` receipt that the SDK parent turns into an ordinary grounding
+verdict. They do not turn application hooks into kernel evidence, and the FUSE
+transport only grounds cited paths under its signed `coverage_roots`.
+
+```bash
+uv add mareforma-pro
+```
+
 ## (Optional) bootstrap a signing key
 
 ```bash
@@ -141,6 +152,7 @@ start. `stdio` is the only transport.
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. Opts into RFC 6962 Merkle inclusion-proof verification on every submit + `refresh_unsigned()`. Persists to `.mareforma/rekor_log_pubkey.pem` as a TOFU pin; silent rotation refused. Mutually exclusive with `rekor_log_pubkey_path`. |
 | `rekor_log_pubkey_path` | `str \| Path \| None` | `None` | Path to a PEM file with the Rekor log operator public key. Equivalent to passing the file bytes via `rekor_log_pubkey_pem`. |
 | `validator_type` | `str` | `"human"` | `"human"` or `"llm"`, the self-declared type recorded if this key auto-enrolls as the project's root validator. Ignored once a root exists. Pass `"llm"` when an agent bootstraps its own project: an `llm` validator cannot sign off on a claim. |
+| `external_grounding_verifier` | callable \| None | `None` | Trusted verifier for a full external grounding receipt. It runs in the SDK parent and returns a minted `GroundingVerdict` or `None`; without one, a full external receipt is stored as `DECLARED` / `OPAQUE(unsigned_declared)`. |
 
 ```python
 graph = mareforma.open()                                              # cwd, unsigned if no key

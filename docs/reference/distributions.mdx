@@ -1,0 +1,142 @@
+---
+title: "Package distributions"
+description: "Install, test, build, and release the core mareforma package and the independently published mareforma-pro extension."
+---
+
+Mareforma ships as two independent Python distributions. The distribution name
+and the Python import name are intentionally different for the extension:
+hyphens are valid in distribution metadata, while Python imports require
+underscores.
+
+| Distribution | Import package | Purpose | Release tag |
+| --- | --- | --- | --- |
+| `mareforma` | `mareforma` | Core epistemic graph, signing, grounding, CLI, and MCP server | `vX.Y.Z` |
+| `mareforma-pro` | `mareforma_pro` | Rootless, no-`sudo` observation transports and application hooks | `mareforma-pro-vX.Y.Z` |
+
+`mareforma-pro` depends on the core package and does not replace it:
+
+```bash
+uv add mareforma
+uv add mareforma-pro
+```
+
+The optional OTLP exporter belongs to the extension, not to the core package:
+
+```bash
+uv add "mareforma-pro[otel]"
+```
+
+## Source layout
+
+The extension lives in its own project directory with its own build metadata,
+version, package discovery, tests, and release workflow:
+
+```text
+mareforma/                    # core import package
+mareforma-pro/
+  pyproject.toml              # name = "mareforma-pro"
+  src/mareforma_pro/          # import package
+  tests/                      # extension tests
+```
+
+The core `pyproject.toml` includes only `mareforma` and `mareforma.*`. Its
+manifest also prunes the extension directory, so a core wheel or sdist must
+never contain `mareforma_pro` or the `mareforma-pro` console script.
+
+## Test both projects
+
+Install the editable projects in the same environment, then run each suite:
+
+```bash
+uv pip install -e ".[dev]"
+uv pip install -e "./mareforma-pro[dev]"
+uv run pytest
+uv run --no-sync pytest mareforma-pro/tests
+```
+
+CI runs the core matrix and the extension matrix separately. The extension
+job installs the local core checkout first, so it tests the checkout under
+review rather than an older `mareforma` release from PyPI.
+
+## Build and inspect
+
+Build each distribution from its own project so their artifacts never mix:
+
+```bash
+uv build --clear --out-dir /tmp/mareforma-dist .
+uv build --clear --out-dir /tmp/mareforma-pro-dist mareforma-pro
+uvx --from twine twine check /tmp/mareforma-dist/* /tmp/mareforma-pro-dist/*
+```
+
+The extension wheel is normalized by Python packaging rules to a filename like
+`mareforma_pro-0.1.0-py3-none-any.whl`, but its metadata still reads
+`Name: mareforma-pro`:
+
+```bash
+unzip -p /tmp/mareforma-pro-dist/mareforma_pro-*.whl \
+  'mareforma_pro-*.dist-info/METADATA' | grep '^Name:'
+```
+
+## Independent release
+
+The repository uses two release workflows:
+
+- `.github/workflows/publish.yml` reacts only to `vX.Y.Z` releases and publishes
+  the core `mareforma` distribution.
+- `.github/workflows/publish-pro.yml` reacts only to
+  `mareforma-pro-vX.Y.Z` releases, builds from `mareforma-pro/`, and uploads
+  only `mareforma-pro/dist/`.
+
+Before creating a release, bump both version locations in the extension:
+
+- `mareforma-pro/pyproject.toml`
+- `mareforma-pro/src/mareforma_pro/__init__.py`
+
+The publish workflow refuses a release when the tag, wheel version, and
+`mareforma_pro.__version__` disagree.
+
+### PyPI trusted publisher
+
+Create a separate PyPI project for `mareforma-pro` and configure its trusted
+publisher with:
+
+- repository: this repository
+- workflow: `publish-pro.yml`
+- environment: `pypi`
+- tag namespace: `mareforma-pro-v*`
+
+The core project keeps its existing trusted-publisher configuration. A release
+of one distribution does not publish the other.
+
+### Manual upload fallback
+
+If trusted publishing is unavailable, build the extension, check the artifacts,
+and upload them with a scoped PyPI API token:
+
+```bash
+uv build --clear --out-dir mareforma-pro/dist mareforma-pro
+uvx --from twine twine check mareforma-pro/dist/*
+TWINE_USERNAME=__token__ \
+TWINE_PASSWORD="<project-scoped-token>" \
+uvx --from twine twine upload --skip-existing mareforma-pro/dist/*
+```
+
+Do not use an account password in a command history or commit. Use a
+project-scoped token and revoke it after the release.
+
+## Verify the published package
+
+Install from PyPI in a clean environment, then check both names:
+
+```bash
+uv venv --clear /tmp/mareforma-release-check
+uv pip install --python /tmp/mareforma-release-check/bin/python mareforma-pro
+/tmp/mareforma-release-check/bin/python -c \
+  "from importlib.metadata import version; import mareforma_pro; print(version('mareforma-pro'), mareforma_pro.__version__)"
+/tmp/mareforma-release-check/bin/mareforma-pro doctor --json
+```
+
+The import must resolve to `mareforma_pro`, and the console command must be
+`mareforma-pro`. A missing core dependency, a wheel that contains the wrong
+package, or an accidental `mareforma-pro` entry point in the core wheel fails
+this check.

@@ -79,6 +79,7 @@
               "reference/api",
               "reference/data-model",
               "reference/cli",
+              "reference/distributions",
               "reference/changelog"
             ]
           },

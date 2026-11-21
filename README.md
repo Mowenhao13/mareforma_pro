@@ -19,6 +19,7 @@
 
 <p align="center">
   <a href="https://pypi.org/project/mareforma/"><img src="https://img.shields.io/pypi/v/mareforma" alt="PyPI"></a>
+  <a href="https://pypi.org/project/mareforma-pro/"><img src="https://img.shields.io/pypi/v/mareforma-pro" alt="mareforma-pro PyPI"></a>
   <a href="https://pypi.org/project/mareforma/"><img src="https://img.shields.io/pypi/pyversions/mareforma" alt="Python"></a>
   <a href="https://github.com/mareforma/mareforma/actions/workflows/tests.yml"><img src="https://github.com/mareforma/mareforma/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
@@ -158,14 +159,20 @@ mareforma bootstrap   # optional: sign your claims and enable the public log
 ## Rootless observation (`mareforma-pro`)
 
 For hosts where the user cannot obtain `sudo`, CAP_BPF, or a writable cgroup
-subtree, the separately released `mareforma-pro` distribution provides the
-`mareforma_pro` import package and a lower-assurance but fully user-space path.
-It depends on the core `mareforma` distribution and is versioned independently;
-releases use the `mareforma-pro-vX.Y.Z` tag namespace:
+subtree, the separately released [`mareforma-pro`](https://pypi.org/project/mareforma-pro/)
+distribution provides the `mareforma_pro` import package and a lower-assurance
+but fully user-space path. It depends on the core `mareforma` distribution and
+is versioned independently; releases use the `mareforma-pro-vX.Y.Z` tag
+namespace. Build, release, and verification details are in
+[Package distributions](https://docs.mareforma.com/reference/distributions).
 
 ```bash
 uv add mareforma-pro
 ```
+
+The published wheel filename is normalized to `mareforma_pro-*.whl`; the
+distribution metadata is still `Name: mareforma-pro`, and the import is
+`mareforma_pro`.
 
 Its default route wraps a non-setuid `bwrap` command in
 `strace --seccomp-bpf -f -y`, parses the syscall stream deterministically, and

@@ -13,6 +13,7 @@ import os
 import posixpath
 import time
 from typing import Any, Iterable, Mapping
+from urllib.parse import urlsplit
 
 
 RECEIPT_SCHEMA = "mareforma_pro.rootless_receipt/v1"
@@ -30,6 +31,15 @@ OPAQUE_STATIC_BINARY_UNTRACED = "static_binary_untraced"
 OPAQUE_OPEN_ONLY = "open_only"
 OPAQUE_SOCKET_UNBOUND = "socket_event_unbound"
 OPAQUE_NO_CITED_SOURCE = "no_cited_source"
+OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE = "computed_no_external_source"
+
+# Whether this observation was expected to read an external source. Most scopes
+# default to ``required``. A pure computation can explicitly say that no external
+# source exists; the verdict remains OPAQUE, but names a different reason so a
+# product layer does not confuse it with a missing citation for data work.
+SOURCE_REQUIRED = "required"
+SOURCE_NOT_APPLICABLE = "not_applicable"
+SOURCE_REQUIREMENTS = frozenset({SOURCE_REQUIRED, SOURCE_NOT_APPLICABLE})
 OPAQUE_REASONS = frozenset(
     {
         OPAQUE_UNMAPPED_TMPFS,
@@ -41,26 +51,30 @@ OPAQUE_REASONS = frozenset(
         OPAQUE_OPEN_ONLY,
         OPAQUE_SOCKET_UNBOUND,
         OPAQUE_NO_CITED_SOURCE,
+        OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE,
     }
 )
 
 
 def normalize_path(value: str | os.PathLike[str]) -> str:
-    """Normalize a local path without requiring it to exist.
+    """Normalize a local path or URL without requiring the target to exist.
 
     Existing paths are realpath'd so a symlinked data directory compares the
     same way as the core observer's citations. Non-existing paths use lexical
     normalization; this keeps a missing citation from silently matching a
-    different path.
+    different path. URLs are reduced to ``scheme://host[:port]/path``: userinfo,
+    query strings, and fragments are dropped before they can enter a signed
+    receipt, because those often carry credentials or presigned secrets.
     """
     raw = os.fspath(value)
     if isinstance(raw, bytes):
         raw = os.fsdecode(raw)
     if not raw:
         return ""
-    # URLs and sha256 content addresses are not filesystem paths.
-    if "://" in raw or raw.startswith("sha256:"):
+    if raw.startswith("sha256:"):
         return raw
+    if "://" in raw:
+        return _normalize_url(raw)
     try:
         if os.path.lexists(raw):
             return os.path.realpath(raw)
@@ -69,7 +83,29 @@ def normalize_path(value: str | os.PathLike[str]) -> str:
     return posixpath.normpath(raw)
 
 
+def _normalize_url(raw: str) -> str:
+    """Return a credential-free URL identity, or the stripped input otherwise."""
+    try:
+        parts = urlsplit(raw)
+        if parts.scheme == "file" and parts.path:
+            return posixpath.normpath(parts.path)
+        if not parts.scheme or not parts.netloc:
+            return raw.strip()
+        host = parts.hostname or ""
+        if ":" in host:
+            host = f"[{host}]"
+        try:
+            port = f":{parts.port}" if parts.port else ""
+        except ValueError:
+            port = ""
+        return f"{parts.scheme.lower()}://{host}{port}{parts.path or '/'}"
+    except (TypeError, ValueError):
+        return raw.strip()
+
+
 def normalize_many(values: Iterable[str]) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        values = (values,)
     out: list[str] = []
     seen: set[str] = set()
     for value in values:
@@ -108,10 +144,16 @@ class ScopeRegistration:
     read_semantics: str = "READ_INTENT"
     coverage_roots: tuple[str, ...] = ()
     collector_mode: str | None = None
+    source_requirement: str = SOURCE_REQUIRED
 
     def __post_init__(self) -> None:
         if not self.scope_id:
             raise ValueError("scope_id must not be empty")
+        if self.source_requirement not in SOURCE_REQUIREMENTS:
+            raise ValueError(
+                "source_requirement must be one of: "
+                + ", ".join(sorted(SOURCE_REQUIREMENTS))
+            )
         object.__setattr__(self, "mount_map", normalize_mount_map(self.mount_map))
         object.__setattr__(
             self,
@@ -130,8 +172,11 @@ class ScopeEvidence:
 
     ``observed_files`` are paths for which a successful read syscall was seen
     (or, for application hooks, an explicit read event was reported).
-    ``opened_only`` are paths opened for reading but not observed being read.
-    The distinction is intentionally part of the wire format.
+    ``observed_urls`` are application-reported URL reads, never kernel network
+    evidence. They are carried only when an application adapter explicitly says
+    the response bytes arrived for that URL. ``opened_only`` are paths opened for
+    reading but not observed being read. The distinction is intentionally part
+    of the wire format.
     """
 
     scope_id: str
@@ -157,10 +202,16 @@ class ScopeEvidence:
     # contract (for example a root_passthrough strace run).
     coverage_roots: tuple[str, ...] = ()
     hmac_signature: str | None = None
+    # Append-only wire fields. Keep them after every pre-existing positional
+    # field so a caller constructing ScopeEvidence positionally keeps its
+    # meaning across the 0.1 -> 0.2 transition.
+    observed_urls: tuple[str, ...] = ()
+    source_requirement: str = SOURCE_REQUIRED
 
     def __post_init__(self) -> None:
         for name in (
             "observed_files",
+            "observed_urls",
             "observed_dirs",
             "opened_only",
             "unmapped_paths",
@@ -171,6 +222,11 @@ class ScopeEvidence:
         ):
             object.__setattr__(self, name, tuple(dict.fromkeys(getattr(self, name) or ())))
         object.__setattr__(self, "processes", tuple(self.processes or ()))
+        if self.source_requirement not in SOURCE_REQUIREMENTS:
+            raise ValueError(
+                "source_requirement must be one of: "
+                + ", ".join(sorted(SOURCE_REQUIREMENTS))
+            )
 
     def to_receipt_dict(self) -> dict[str, Any]:
         """Return a fresh JSON-compatible mapping, including the signature."""
@@ -196,6 +252,10 @@ class ScopeEvidence:
             "parent_scope_id": self.parent_scope_id,
             "hmac_signature": self.hmac_signature,
         }
+        if self.observed_urls:
+            receipt["observed_urls"] = list(self.observed_urls)
+        if self.source_requirement != SOURCE_REQUIRED:
+            receipt["source_requirement"] = self.source_requirement
         # Keep older receipts byte-identical when no coverage bound was
         # recorded. A non-empty root list is signed as part of the receipt.
         if self.coverage_roots:
@@ -209,6 +269,7 @@ class ScopeEvidence:
         return cls(
             scope_id=str(receipt.get("scope_id", "")),
             observed_files=tuple(receipt.get("observed_files") or ()),
+            observed_urls=tuple(receipt.get("observed_urls") or ()),
             observed_dirs=tuple(receipt.get("observed_dirs") or ()),
             opened_only=tuple(receipt.get("opened_only") or ()),
             unmapped_paths=tuple(receipt.get("unmapped_paths") or ()),
@@ -227,6 +288,9 @@ class ScopeEvidence:
             traceparent=receipt.get("traceparent"),
             parent_scope_id=receipt.get("parent_scope_id"),
             coverage_roots=tuple(receipt.get("coverage_roots") or ()),
+            source_requirement=str(
+                receipt.get("source_requirement", SOURCE_REQUIRED)
+            ),
             hmac_signature=receipt.get("hmac_signature"),
         )
 

@@ -7,7 +7,11 @@ import os
 from pathlib import Path
 
 from mareforma_pro.collector import RootlessCollector
-from mareforma_pro.evidence import ScopeEvidence
+from mareforma_pro.evidence import (
+    OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE,
+    SOURCE_NOT_APPLICABLE,
+    ScopeEvidence,
+)
 from mareforma_pro.otel import (
     AsyncJsonlSpanExporter,
     process_spans_from_evidence,
@@ -68,14 +72,92 @@ def test_collector_server_rejects_bad_token(tmp_path: Path):
         server.shutdown()
 
 
+def test_collector_server_round_trips_url_manifest_and_source_requirement(tmp_path: Path):
+    socket_path = tmp_path / "collector.sock"
+    collector = RootlessCollector("secret")
+    server = CollectorServer(socket_path, collector)
+    server.serve_in_thread()
+    try:
+        client = CollectorClient(socket_path)
+        opened = client.request(
+            {
+                "op": "open_scope",
+                "scope_id": "scp_url",
+                "evidence_level": "APPLICATION_HTTP",
+                "read_semantics": "URL_READ",
+                "collector_mode": "application_http",
+            }
+        )
+        assert opened["ok"] is True
+        ingested = client.request(
+            {
+                "op": "ingest_events",
+                "scope_id": "scp_url",
+                "observed_urls": ["https://api.example.org/v1/protein?token=secret"],
+                "payload_digests": ["sha256:" + "a" * 64],
+            }
+        )
+        assert ingested["ok"] is True
+        closed = client.request({"op": "close_scope", "scope_id": "scp_url"})
+        receipt = closed["receipt"]
+        assert receipt["observed_urls"] == ["https://api.example.org/v1/protein"]
+        assert "secret" not in json.dumps(receipt)
+
+        opened_compute = client.request(
+            {
+                "op": "open_scope",
+                "scope_id": "scp_compute",
+                "source_requirement": SOURCE_NOT_APPLICABLE,
+            }
+        )
+        assert opened_compute["ok"] is True
+        closed_compute = client.request(
+            {"op": "close_scope", "scope_id": "scp_compute"}
+        )
+        verified = collector.verify(closed_compute["receipt"])
+        assert verified.evidence.source_requirement == SOURCE_NOT_APPLICABLE
+        verdict = collector.verify(closed_compute["receipt"])
+        from mareforma_pro.observe import verdict_from_evidence
+
+        computed = verdict_from_evidence(verdict, cites=None)
+        assert OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE in computed.opaque_reasons
+    finally:
+        server.shutdown()
+
+
+def test_collector_server_rejects_invalid_source_requirement(tmp_path: Path):
+    socket_path = tmp_path / "collector.sock"
+    server = CollectorServer(socket_path, RootlessCollector("secret"))
+    server.serve_in_thread()
+    try:
+        response = CollectorClient(socket_path).request(
+            {
+                "op": "open_scope",
+                "scope_id": "scp_bad",
+                "source_requirement": "sometimes",
+            }
+        )
+        assert response["ok"] is False
+        assert "source_requirement" in response["error"]
+    finally:
+        server.shutdown()
+
+
 def test_otel_span_and_jsonl_export(tmp_path: Path):
     collector = RootlessCollector("secret")
     collector.open_scope("scp_otel", root_passthrough=True)
-    collector.ingest_events("scp_otel", observed_files=["/data/a.csv"])
+    collector.ingest_events(
+        "scp_otel",
+        observed_files=["/data/a.csv"],
+        observed_urls=["https://api.example.org/v1/protein?token=secret"],
+    )
     evidence = collector.close_scope("scp_otel")
     span = scope_span_from_evidence(evidence, verdict="GROUNDED")
     assert span["name"] == "mareforma.scope"
     assert span["attributes"]["mareforma.scope_id"] == "scp_otel"
+    assert span["attributes"]["mareforma.observed_urls"] == [
+        "https://api.example.org/v1/protein"
+    ]
     out = tmp_path / "spans.jsonl"
     exporter = AsyncJsonlSpanExporter(out)
     exporter.export(span)
@@ -147,4 +229,3 @@ def test_exporter_failure_does_not_change_the_receipt(tmp_path: Path):
     collector.ingest_events("scp_broken_export", observed_files=["/data/a.csv"])
     evidence = collector.close_scope("scp_broken_export")
     assert collector.verify(evidence).evidence.observed_files == ("/data/a.csv",)
-

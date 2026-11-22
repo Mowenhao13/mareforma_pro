@@ -2,22 +2,30 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 
 import mareforma
-from mareforma.observe import GroundingVerdict, ObservedGrounding
+from mareforma.observe import ObservedGrounding
 from mareforma_pro.collector import RootlessCollector
+from mareforma_pro.http import record_url_read
 from mareforma_pro.observe import (
     CollectorBackend,
     ReceiptVerifier,
     RootlessObservation,
     assert_claim_from_receipt,
     observe,
-    verdict_from_evidence,
     verify_and_verdict,
 )
-from mareforma_pro.evidence import ScopeRegistration
+from mareforma_pro.evidence import (
+    OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE,
+    OPAQUE_TRACE_INCOMPLETE,
+    SOURCE_NOT_APPLICABLE,
+    ScopeRegistration,
+)
+
+observe_module = importlib.import_module("mareforma_pro.observe")
 
 
 def _receipt(tmp_path: Path, *, read: bool = True):
@@ -174,6 +182,209 @@ def test_no_cited_source_is_opaque_even_when_a_read_was_observed(tmp_path):
     assert verdict.grounding is ObservedGrounding.OPAQUE
     assert "no_cited_source" in verdict.opaque_reasons
     assert verdict.evidence_level == "USER_TRACE"
+
+
+def test_diagnostics_survive_the_released_core_without_optional_fields(monkeypatch):
+    collector = RootlessCollector("secret")
+    collector.open_scope("scp_old_core")
+    evidence = collector.close_scope("scp_old_core")
+    monkeypatch.setattr(observe_module, "_CORE_VERDICT_FIELDS", frozenset())
+    verdict = verify_and_verdict(
+        evidence.to_receipt_dict(), secret="secret", cites=None
+    )
+    assert verdict.grounding is ObservedGrounding.OPAQUE
+    assert "opaque_reasons=no_cited_source" in verdict.reason
+    assert "read_semantics=READ_INTENT" in verdict.reason
+    assert "evidence_level=USER_TRACE" in verdict.reason
+
+
+def test_computation_only_scope_names_the_distinct_reason():
+    collector = RootlessCollector("secret")
+    collector.open_scope(
+        "scp_computed",
+        evidence_level="APPLICATION_PYTHON_AUDIT",
+        read_semantics="COMPUTED_ONLY",
+        source_requirement=SOURCE_NOT_APPLICABLE,
+    )
+    evidence = collector.close_scope("scp_computed")
+    verdict = verify_and_verdict(
+        evidence.to_receipt_dict(), secret="secret", cites=None
+    )
+
+    assert verdict.grounding is ObservedGrounding.OPAQUE
+    assert OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE in verdict.opaque_reasons
+    assert "no_cited_source" not in verdict.opaque_reasons
+    assert evidence.to_receipt_dict()["source_requirement"] == SOURCE_NOT_APPLICABLE
+
+
+def test_computed_only_read_semantics_also_names_the_distinct_reason():
+    collector = RootlessCollector("secret")
+    collector.open_scope("scp_computed_semantics", read_semantics="COMPUTED_ONLY")
+    evidence = collector.close_scope("scp_computed_semantics")
+    verdict = verify_and_verdict(
+        evidence.to_receipt_dict(), secret="secret", cites=None
+    )
+    assert verdict.grounding is ObservedGrounding.OPAQUE
+    assert OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE in verdict.opaque_reasons
+
+
+def test_application_url_read_manifest_grounds_a_url_citation():
+    url = "https://api.example.org/v1/protein?id=TP53&token=redacted"
+    collector = RootlessCollector("secret")
+    collector.open_scope(
+        "scp_url",
+        evidence_level="APPLICATION_HTTP",
+        read_semantics="URL_READ",
+        collector_mode="application_http",
+    )
+    collector.ingest_events(
+        "scp_url",
+        observed_urls=[url],
+        payload_digests=["sha256:" + "a" * 64],
+    )
+    evidence = collector.close_scope("scp_url")
+    verdict = verify_and_verdict(
+        evidence.to_receipt_dict(),
+        secret="secret",
+        cites="https://api.example.org/v1/protein?id=TP53",
+    )
+
+    assert verdict.grounding is ObservedGrounding.GROUNDED
+    assert verdict.grounded_sources == ("https://api.example.org/v1/protein",)
+    assert "application-url" in {read.kind for read in verdict.reads}
+    assert "query" not in verdict.receipt()["reads"][0]["identifier"]
+
+
+def test_unobserved_url_is_ungrounded_without_a_blind_spot():
+    collector = RootlessCollector("secret")
+    collector.open_scope(
+        "scp_url_missing",
+        evidence_level="APPLICATION_HTTP",
+        read_semantics="URL_READ",
+    )
+    evidence = collector.close_scope("scp_url_missing")
+    verdict = verify_and_verdict(
+        evidence.to_receipt_dict(),
+        secret="secret",
+        cites="https://api.example.org/v1/missing",
+    )
+
+    assert verdict.grounding is ObservedGrounding.UNGROUNDED
+
+
+def test_url_helper_sanitizes_query_and_records_a_digest():
+    collector = RootlessCollector("secret")
+    collector.open_scope(
+        "scp_url_helper",
+        evidence_level="APPLICATION_HTTP",
+        read_semantics="URL_READ",
+        collector_mode="application_http",
+    )
+    digest = record_url_read(
+        collector,
+        "scp_url_helper",
+        "https://user:pass@api.example.org/v1/protein?id=TP53&token=secret",
+        {"protein": "TP53"},
+    )
+    evidence = collector.close_scope("scp_url_helper").to_receipt_dict()
+    assert evidence["observed_urls"] == ["https://api.example.org/v1/protein"]
+    assert evidence["payload_digests"] == [digest]
+    assert "secret" not in json.dumps(evidence)
+    assert "pass" not in json.dumps(evidence)
+    verdict = verify_and_verdict(
+        evidence,
+        secret="secret",
+        cites="https://api.example.org/v1/protein",
+    )
+    assert verdict.grounding is ObservedGrounding.GROUNDED
+
+
+def test_a_later_nonempty_url_read_clears_open_only():
+    collector = RootlessCollector("secret")
+    url = "https://api.example.org/v1/retry"
+    collector.open_scope(
+        "scp_url_retry",
+        evidence_level="APPLICATION_HTTP",
+        read_semantics="URL_READ",
+        collector_mode="application_http",
+    )
+    collector.ingest_events("scp_url_retry", opened_only=[url])
+    collector.ingest_events("scp_url_retry", observed_urls=[url])
+    evidence = collector.close_scope("scp_url_retry")
+    assert evidence.opened_only == ()
+    verdict = verify_and_verdict(
+        evidence.to_receipt_dict(), secret="secret", cites=url
+    )
+    assert verdict.grounding is ObservedGrounding.GROUNDED
+
+
+def test_empty_url_read_stays_opaque():
+    collector = RootlessCollector("secret")
+    collector.open_scope(
+        "scp_url_empty",
+        evidence_level="APPLICATION_HTTP",
+        read_semantics="URL_READ",
+        collector_mode="application_http",
+    )
+    record_url_read(
+        collector,
+        "scp_url_empty",
+        "https://api.example.org/v1/empty",
+        b"",
+    )
+    evidence = collector.close_scope("scp_url_empty")
+    verdict = verify_and_verdict(
+        evidence.to_receipt_dict(),
+        secret="secret",
+        cites="https://api.example.org/v1/empty",
+    )
+    assert verdict.grounding is ObservedGrounding.OPAQUE
+    assert "open_only" in verdict.opaque_reasons
+
+
+def test_url_citation_in_generic_application_scope_is_opaque():
+    collector = RootlessCollector("secret")
+    collector.open_scope(
+        "scp_app_url",
+        evidence_level="APPLICATION_PYTHON_AUDIT",
+        read_semantics="OPEN_INTENT",
+        collector_mode="application_python_audit",
+    )
+    evidence = collector.close_scope("scp_app_url")
+    verdict = verify_and_verdict(
+        evidence.to_receipt_dict(),
+        secret="secret",
+        cites="https://api.example.org/v1/protein",
+    )
+    assert verdict.grounding is ObservedGrounding.OPAQUE
+    assert OPAQUE_TRACE_INCOMPLETE in verdict.opaque_reasons
+
+
+def test_fuse_scope_url_citation_is_opaque(tmp_path):
+    collector = RootlessCollector("secret")
+    collector.open_scope(
+        "scp_fuse_url",
+        coverage_roots=[str(tmp_path)],
+        collector_mode="fuse_read_proxy",
+        evidence_level="USER_FUSE",
+        read_semantics="READ_BYTES",
+    )
+    evidence = collector.close_scope("scp_fuse_url")
+    verdict = verify_and_verdict(
+        evidence.to_receipt_dict(),
+        secret="secret",
+        cites="https://api.example.org/v1/protein",
+    )
+    assert verdict.grounding is ObservedGrounding.OPAQUE
+    assert OPAQUE_TRACE_INCOMPLETE in verdict.opaque_reasons
+
+
+def test_receipt_omits_new_optional_fields_at_defaults():
+    collector = RootlessCollector("secret")
+    collector.open_scope("scp_default_fields")
+    receipt = collector.close_scope("scp_default_fields").to_receipt_dict()
+    assert "observed_urls" not in receipt
+    assert "source_requirement" not in receipt
 
 def test_verified_scope_evidence_can_be_reverified_without_unwrapping(tmp_path):
     data, evidence, collector = _receipt(tmp_path)

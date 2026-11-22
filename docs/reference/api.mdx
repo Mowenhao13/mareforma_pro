@@ -1683,6 +1683,14 @@ performs the unprivileged mount. The proxy records `opened_only` on a
 successful open and `observed_files` only when a FUSE read returns non-empty
 bytes. Write operations return `EROFS`.
 
+`JupyterScopeHook`, `audit_scope`, and `MCPApplicationMiddleware` are
+application-level observers. Native extension imports, `ctypes.dlopen` /
+`ctypes.dlsym`, process creation, thread creation, and `socket.connect` now add
+an explicit OPAQUE boundary (`static_binary_untraced`, `trace_incomplete`, or
+`socket_event_unbound`). The hook only records the boundary; it does not claim
+the native bytes were seen. A direct matching Python read can still ground a
+file, but the residual native/process blind spot remains disclosed.
+
 `verify_and_verdict()` verifies the receipt HMAC in the SDK parent, converts
 the evidence into a minted `GroundingVerdict`, and returns the normal compact
 signed record through `to_signed_dict()`. `assert_claim_from_receipt()` performs
@@ -1710,22 +1718,62 @@ the receipt, core still degrades the record to `DECLARED`.
 
 `ScopeEvidence` separates `observed_files` (a successful read syscall or an
 explicit application read event) from `opened_only` (an open for reading with no
-observed read). `opaque_reasons` is carried on the verdict and into the signed
-record only when non-empty. Rootless `strace` is `USER_TRACE` with
-`READ_INTENT`; FUSE is `USER_FUSE` with `READ_BYTES` and
-`collector_mode=fuse_read_proxy`; Jupyter is `APPLICATION_PYTHON_AUDIT` with
-`OPEN_INTENT`; MCP is `APPLICATION_MCP`. A third-party MCP response records a
-payload SHA-256 and remains `OPAQUE(external_mcp)`. The digest is audit material
-for comparing the response a caller retained; it is not an automatic semantic
-check that a claim's text matches the response.
+observed read). `observed_urls` is an application-reported URL read manifest;
+it is never kernel network evidence and is emitted only when an adapter has a
+successful response. `source_requirement="not_applicable"` lets a pure
+computation close with `OPAQUE(computed_no_external_source)` instead of the
+generic `OPAQUE(no_cited_source)`. The default `required` value is omitted from
+the receipt, so existing receipts stay byte-identical. `opaque_reasons` is
+carried on the verdict and into the signed record only when non-empty.
+`source_requirement` is an orchestrator declaration, not a model-controlled
+switch: it renames a diagnosis but never upgrades OPAQUE to GROUNDED, and a
+missing external source is still disclosed on the trust surface.
+Rootless `strace` is `USER_TRACE` with `READ_INTENT`; FUSE is `USER_FUSE` with
+`READ_BYTES` and `collector_mode=fuse_read_proxy`; Jupyter is
+`APPLICATION_PYTHON_AUDIT` with `OPEN_INTENT`; MCP is `APPLICATION_MCP`. A
+third-party MCP response records a payload SHA-256 and remains
+`OPAQUE(external_mcp)`. The digest is audit material for comparing the response
+a caller retained; it is not an automatic semantic check that a claim's text
+matches the response.
+
+HTTP and database tools that know the request URL should report the completed
+read explicitly:
+
+```python
+from mareforma_pro import record_url_read
+
+digest = record_url_read(
+    collector,
+    scope_id,
+    "https://api.example.org/v1/protein?id=TP53&token=secret",
+    response,
+)
+```
+
+The helper removes userinfo, query strings, and fragments before the URL enters
+a signed receipt, hashes the response bytes with SHA-256, and records
+`observed_urls` plus `payload_digests`. A cited URL in a generic Python or MCP
+scope with no manifest is `OPAQUE(trace_incomplete)`; a dedicated
+`application_http` / `URL_READ` scope with no observed URL can be
+`UNGROUNDED`. Never infer a successful URL read from a `socket.connect` event
+alone. The signed URL identity deliberately omits query strings, so an adapter
+must bind query-specific values (such as an accession or search term) in its
+own claim evidence if they distinguish two otherwise identical URLs.
+
+For a self-hosted MCP wrapper, the same manifest can be attached at the
+operation boundary with `MCPApplicationMiddleware(..., observed_urls=[url])`.
+The middleware still reports the payload digest and remains
+`OPAQUE(external_mcp)` when `external=True`.
 
 A FUSE receipt also carries `coverage_roots`, the host paths that view could
 observe. A citation under one of those roots but absent from `observed_files`
 can still be `UNGROUNDED`; a citation outside every root is
 `OPAQUE(unmapped_sandbox_path)`, because that backend never had the chance to
-see it. `RootlessFuseRunner` shadows the original host source path with a tmpfs
-inside `bwrap` by default, so the mounted view is the only in-sandbox route to
-the data.
+see it. A URL citation under a FUSE or generic application scope with no
+explicit URL manifest is `OPAQUE(trace_incomplete)`, because the view's
+coverage roots describe files, not network delivery. `RootlessFuseRunner`
+shadows the original host source path with a tmpfs inside `bwrap` by default,
+so the mounted view is the only in-sandbox route to the data.
 
 The HMAC is a process-boundary integrity check, not a defense against code in
 the parent that can read the secret. The runner's default `bwrap --clearenv`

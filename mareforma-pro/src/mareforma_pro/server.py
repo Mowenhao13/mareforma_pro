@@ -130,6 +130,9 @@ class CollectorServer:
                         read_semantics=str(request.get("read_semantics", "READ_INTENT")),
                         collector_mode=request.get("collector_mode"),
                         coverage_roots=request.get("coverage_roots") or (),
+                        source_requirement=str(
+                            request.get("source_requirement", "required")
+                        ),
                     )
                     return {"ok": True, "scope_id": scope_id}
                 if op == "ingest_strace":
@@ -151,6 +154,7 @@ class CollectorServer:
                     self.collector.ingest_events(
                         scope_id,
                         observed_files=request.get("observed_files") or (),
+                        observed_urls=request.get("observed_urls") or (),
                         observed_dirs=request.get("observed_dirs") or (),
                         opened_only=request.get("opened_only") or (),
                         payload_digests=request.get("payload_digests") or (),

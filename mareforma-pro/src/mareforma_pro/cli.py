@@ -14,6 +14,7 @@ import click
 
 from .collector import RootlessCollector
 from .errors import MareformaProError
+from .evidence import SOURCE_REQUIREMENTS
 from .observe import verify_and_verdict
 from .otel import AsyncJsonlSpanExporter
 from .runner import RootlessBwrapRunner, RootlessFuseRunner
@@ -110,6 +111,12 @@ def doctor(as_json: bool) -> None:
 @click.option("--tmpfs", "tmpfs_mounts", multiple=True, default=("/tmp",), show_default=True)
 @click.option("--timeout", default=60.0, show_default=True, type=float)
 @click.option("--keep-log", is_flag=True)
+@click.option(
+    "--source-requirement",
+    type=click.Choice(sorted(SOURCE_REQUIREMENTS)),
+    default="required",
+    show_default=True,
+)
 @click.option("--json", "as_json", is_flag=True)
 def run(
     command: tuple[str, ...],
@@ -120,6 +127,7 @@ def run(
     tmpfs_mounts: tuple[str, ...],
     timeout: float,
     keep_log: bool,
+    source_requirement: str,
     as_json: bool,
 ) -> None:
     """Run a command under bwrap+strace and emit a rootless receipt."""
@@ -136,6 +144,7 @@ def run(
             tmpfs_mounts=tmpfs_mounts,
             timeout_sec=timeout,
             keep_log=keep_log,
+            source_requirement=source_requirement,
         )
         verdict = verify_and_verdict(
             result.evidence.to_receipt_dict(),
@@ -183,6 +192,12 @@ def run(
 @click.option("--cite", "cites", multiple=True, help="Cited host source path/URL.")
 @click.option("--tmpfs", "tmpfs_mounts", multiple=True, default=("/tmp",), show_default=True)
 @click.option("--timeout", default=60.0, show_default=True, type=float)
+@click.option(
+    "--source-requirement",
+    type=click.Choice(sorted(SOURCE_REQUIREMENTS)),
+    default="required",
+    show_default=True,
+)
 @click.option("--json", "as_json", is_flag=True)
 def run_fuse(
     command: tuple[str, ...],
@@ -193,6 +208,7 @@ def run_fuse(
     cites: tuple[str, ...],
     tmpfs_mounts: tuple[str, ...],
     timeout: float,
+    source_requirement: str,
     as_json: bool,
 ) -> None:
     """Run a command under a rootless read-only FUSE view (no ptrace)."""
@@ -209,6 +225,7 @@ def run_fuse(
             hide_source_root=not keep_source_visible,
             tmpfs_mounts=tmpfs_mounts,
             timeout_sec=timeout,
+            source_requirement=source_requirement,
         )
         verdict = verify_and_verdict(
             result.evidence.to_receipt_dict(),

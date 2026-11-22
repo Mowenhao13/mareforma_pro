@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import os
 from typing import Any, Iterable, Iterator
 
 from mareforma.observe import ScopeNotClosedError
 from mareforma.observe import observe as _core_observe
-from mareforma.observe._citation import cited_set, normalize_identifier
+from mareforma.observe._citation import citation_kind, cited_set, normalize_identifier
 from mareforma.observe._verdict import (
     GroundingVerdict,
     ObservedGrounding,
@@ -21,12 +21,15 @@ from mareforma.observe._verdict import (
 from .backend import CollectorBackend, EvidenceBackend, InProcessBackend
 from .collector import RootlessCollector
 from .evidence import (
+    OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE,
+    OPAQUE_EXTERNAL_MCP,
     OPAQUE_NO_CITED_SOURCE,
     OPAQUE_OPEN_ONLY,
     OPAQUE_SOCKET_UNBOUND,
     OPAQUE_TRACE_INCOMPLETE,
     OPAQUE_UNMAPPED_SANDBOX,
     OPAQUE_UNSIGNED_DECLARED,
+    SOURCE_NOT_APPLICABLE,
     ScopeEvidence,
     ScopeRegistration,
     VerifiedScopeEvidence,
@@ -60,7 +63,19 @@ class RootlessObservation:
 
     @property
     def opaque_reasons(self) -> tuple[str, ...]:
-        return () if self._verdict is None else self._verdict.opaque_reasons
+        if self._verdict is None:
+            return ()
+        reasons = getattr(self._verdict, "opaque_reasons", None)
+        if reasons is not None:
+            return tuple(reasons)
+        # The published core 0.4.0 wheel predates the diagnostic fields. Its
+        # seams still carry the same names, so an older install can expose the
+        # fail-closed reasons without pretending they are a new field.
+        return tuple(
+            dict.fromkeys(
+                seam.kind for seam in getattr(self._verdict, "seams", ()) if seam.kind
+            )
+        )
 
     @property
     def close_error(self) -> BaseException | None:
@@ -94,6 +109,35 @@ def _seams(reasons: Iterable[str], *, opened_only: Iterable[str] = ()) -> tuple[
     return tuple(seams)
 
 
+_CORE_VERDICT_FIELDS = frozenset(field.name for field in fields(GroundingVerdict))
+_DIAGNOSTIC_FIELDS = ("opaque_reasons", "read_semantics", "evidence_level")
+
+
+def _make_verdict(**kwargs: Any) -> GroundingVerdict:
+    """Build a core verdict, tolerating the released 0.4.0 wheel.
+
+    The diagnostics were added to the core checkout after the published
+    0.4.0 wheel. A standalone ``mareforma-pro`` install may therefore receive
+    the older dataclass even though the source tree here has the fields. Keep
+    the same fail-closed decision and preserve the diagnostics in the human
+    reason; never drop a blind spot just because the installed core cannot
+    carry it as a separate field.
+    """
+    folded: list[str] = []
+    for name in _DIAGNOSTIC_FIELDS:
+        if name in _CORE_VERDICT_FIELDS:
+            continue
+        value = kwargs.pop(name, None)
+        if not value:
+            continue
+        text = ",".join(map(str, value)) if name == "opaque_reasons" else str(value)
+        folded.append(f"{name}={text}")
+    if folded:
+        reason = str(kwargs.get("reason") or "").rstrip()
+        kwargs["reason"] = (reason + " " if reason else "") + "[" + "; ".join(folded) + "]"
+    return GroundingVerdict(**kwargs)
+
+
 def verdict_from_evidence(
     verified: VerifiedScopeEvidence,
     *,
@@ -110,13 +154,21 @@ def verdict_from_evidence(
         raise TypeError("verdict_from_evidence requires VerifiedScopeEvidence")
     evidence = verified.evidence
     cited = cited_set(cites)
-    observed = tuple(
+    observed_files = tuple(
         dict.fromkeys(
             normalize_identifier(path)
             for path in evidence.observed_files
             if normalize_identifier(path)
         )
     )
+    observed_urls = tuple(
+        dict.fromkeys(
+            normalize_identifier(url)
+            for url in evidence.observed_urls
+            if normalize_identifier(url)
+        )
+    )
+    observed = tuple(dict.fromkeys((*observed_files, *observed_urls)))
     opened_only = tuple(
         dict.fromkeys(
             normalize_identifier(path)
@@ -131,11 +183,24 @@ def verdict_from_evidence(
     reasons.discard(OPAQUE_OPEN_ONLY)
 
     if not cited:
-        reasons.add(OPAQUE_NO_CITED_SOURCE)
+        computation_only = (
+            evidence.source_requirement == SOURCE_NOT_APPLICABLE
+            or evidence.read_semantics == "COMPUTED_ONLY"
+        )
+        reasons.add(
+            OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE
+            if computation_only
+            else OPAQUE_NO_CITED_SOURCE
+        )
         return _mint(
-            GroundingVerdict(
+            _make_verdict(
                 grounding=ObservedGrounding.OPAQUE,
-                reason="the rootless scope was observed but names no cited source",
+                reason=(
+                    "the rootless scope was declared computation-only; "
+                    "no external source was expected"
+                    if computation_only
+                    else "the rootless scope was observed but names no cited source"
+                ),
                 opaque_reasons=tuple(sorted(reasons)),
                 seams=_seams(reasons),
                 read_semantics=evidence.read_semantics,
@@ -158,13 +223,35 @@ def verdict_from_evidence(
         uncovered = tuple(
             source
             for source in cited
-            if not any(_within_coverage(source, root) for root in coverage_roots)
+            if source.startswith("/")
+            and not any(_within_coverage(source, root) for root in coverage_roots)
         )
         if uncovered:
             reasons.add(OPAQUE_UNMAPPED_SANDBOX)
 
+    # A local application audit hook cannot see HTTP response bytes. If a URL is
+    # cited in such a scope and the adapter did not supply an explicit
+    # ``observed_urls`` manifest, absence is not evidence: it is an unobserved
+    # network boundary. A dedicated application-http scope that did report no
+    # URL is different: its adapter owns the read manifest, so a non-match can
+    # stay UNGROUNDED. FUSE and bounded views are also OPAQUE for URLs because
+    # their coverage roots describe files, not network delivery.
+    url_citations = tuple(c for c in cited if citation_kind(c) == "url")
+    manifest_scope = (
+        bool(observed_urls)
+        or evidence.collector_mode == "application_http"
+        or evidence.read_semantics == "URL_READ"
+    )
+    network_unobservable = (
+        evidence.collector_mode
+        in {"application_python_audit", "application_mcp", "fuse_read_proxy"}
+        or evidence.read_semantics == "OPEN_INTENT"
+        or bool(coverage_roots)
+    )
+    if url_citations and not manifest_scope and network_unobservable:
+        reasons.add(OPAQUE_TRACE_INCOMPLETE)
+
     grounded_sources = tuple(c for c in cited if c in observed)
-    missing = tuple(c for c in cited if c not in observed)
     relevant_open_only = _is_open_only_relevant(opened_only, cited)
     if relevant_open_only:
         reasons.add(OPAQUE_OPEN_ONLY)
@@ -192,9 +279,18 @@ def verdict_from_evidence(
                 nonempty=True,
                 content_address=None,
             )
-            for path in observed
+            for path in observed_files
+        )
+        + tuple(
+            ReadRecord(
+                kind="application-url",
+                identifier=url,
+                nonempty=True,
+                content_address=None,
+            )
+            for url in observed_urls
         ),
-        reads_seen=len(observed),
+        reads_seen=len(observed_files) + len(observed_urls),
         opens_detected=len(opened_only) + len(observed),
         opaque_reasons=tuple(sorted(reasons)),
         read_semantics=evidence.read_semantics,
@@ -202,12 +298,24 @@ def verdict_from_evidence(
     )
     seams = _seams(reasons, opened_only=opened_only)
 
+    if OPAQUE_EXTERNAL_MCP in reasons and grounded_sources:
+        # An external MCP server performs its reads outside this process. A
+        # locally supplied URL manifest, or a local read in the wrapper, cannot
+        # turn that remote execution into local grounding evidence. Keep the
+        # positive read records for audit, but do not claim the cited source is
+        # grounded by the remote call.
+        grounded_sources = ()
+
     if grounded_sources:
+        url_grounded = any(source in observed_urls for source in grounded_sources)
         return _mint(
-            GroundingVerdict(
+            _make_verdict(
                 grounding=ObservedGrounding.GROUNDED,
                 reason=(
-                    "an application-level read-open matched the cited source; "
+                    "an application-level URL read manifest matched the cited URL; "
+                    "this is application evidence, not kernel network proof"
+                    if url_grounded
+                    else "an application-level read-open matched the cited source; "
                     "this is open intent, not proof that bytes were consumed"
                     if application_open
                     else "a rootless FUSE read matched the cited source; "
@@ -224,7 +332,7 @@ def verdict_from_evidence(
 
     if reasons:
         return _mint(
-            GroundingVerdict(
+            _make_verdict(
                 grounding=ObservedGrounding.OPAQUE,
                 reason=(
                     "the observation did not establish a cited read and discloses "
@@ -236,7 +344,7 @@ def verdict_from_evidence(
         )
 
     return _mint(
-        GroundingVerdict(
+        _make_verdict(
             grounding=ObservedGrounding.UNGROUNDED,
             reason=(
                 "the cited source was not opened by the application hook; "
@@ -303,7 +411,7 @@ def observe(
         except BaseException as exc:  # noqa: BLE001 - never mask the body error
             handle._close_error = exc
             handle._verdict = _mint(
-                GroundingVerdict(
+                _make_verdict(
                     grounding=ObservedGrounding.OPAQUE,
                     reason=f"rootless collector close failed: {type(exc).__name__}: {exc}",
                     opaque_reasons=(OPAQUE_TRACE_INCOMPLETE,),
@@ -374,7 +482,7 @@ def verdict_or_opaque(receipt: Any, *, secret: str | bytes, cites: Any) -> Groun
         return verify_and_verdict(receipt, secret=secret, cites=cites)
     except Exception as exc:  # noqa: BLE001 - fail closed at the boundary
         return _mint(
-            GroundingVerdict(
+            _make_verdict(
                 grounding=ObservedGrounding.OPAQUE,
                 reason=f"external receipt unavailable: {type(exc).__name__}: {exc}",
                 opaque_reasons=(OPAQUE_TRACE_INCOMPLETE,),
@@ -428,7 +536,7 @@ def assert_claim_from_receipt(
                 **claim_kwargs,
             )
         verdict = _mint(
-            GroundingVerdict(
+            _make_verdict(
                 grounding=ObservedGrounding.OPAQUE,
                 reason=f"external rootless receipt rejected: {exc}",
                 opaque_reasons=(OPAQUE_UNSIGNED_DECLARED,),

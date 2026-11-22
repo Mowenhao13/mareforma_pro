@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .collector import RootlessCollector
-from .evidence import OPAQUE_EXTERNAL_MCP, OPAQUE_STATIC_BINARY_UNTRACED
+from .evidence import (
+    OPAQUE_EXTERNAL_MCP,
+    SOURCE_REQUIRED,
+)
 from .jupyter import audit_scope
 from .observe import verdict_from_evidence
 
@@ -69,11 +72,13 @@ def record_mcp_payload(
     response: Any,
     *,
     external: bool = True,
+    observed_urls: Iterable[str] = (),
 ) -> str:
     digest = payload_digest(response)
     reasons = [OPAQUE_EXTERNAL_MCP] if external else []
     collector.ingest_events(
         scope_id,
+        observed_urls=observed_urls,
         payload_digests=[digest],
         opaque_reasons=reasons,
     )
@@ -107,12 +112,20 @@ class MCPApplicationMiddleware:
         external: bool = False,
         mount_map: dict[str, str] | None = None,
         root_passthrough: bool = True,
+        source_requirement: str = SOURCE_REQUIRED,
+        observed_urls: Iterable[str] = (),
     ) -> None:
         self.collector = collector
         self.cites = cites
         self.external = external
         self.mount_map = mount_map or {}
         self.root_passthrough = root_passthrough
+        self.source_requirement = source_requirement
+        self.observed_urls = (
+            (observed_urls,)
+            if isinstance(observed_urls, str)
+            else tuple(observed_urls)
+        )
         self.last: MCPObservation | None = None
 
     def __call__(
@@ -134,11 +147,18 @@ class MCPApplicationMiddleware:
             parent_scope_id=context.parent_scope_id,
             evidence_level="APPLICATION_MCP",
             read_semantics="OPEN_INTENT",
+            source_requirement=self.source_requirement,
         )
         try:
             with audit_scope(self.collector, scope_id):
                 result = handler()
-            record_mcp_payload(self.collector, scope_id, result, external=self.external)
+            record_mcp_payload(
+                self.collector,
+                scope_id,
+                result,
+                external=self.external,
+                observed_urls=self.observed_urls,
+            )
             if self.external:
                 self.collector.ingest_events(scope_id, opaque_reasons=[OPAQUE_EXTERNAL_MCP])
             evidence = self.collector.close_scope(scope_id)

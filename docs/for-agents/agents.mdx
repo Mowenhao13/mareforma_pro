@@ -35,7 +35,11 @@ distribution provides the `mareforma_pro` import package and two local
 transports: `strace + bwrap` and a ptrace-free FUSE view. Both sign an HMAC
 `ScopeEvidence` receipt that the SDK parent turns into an ordinary grounding
 verdict. They do not turn application hooks into kernel evidence, and the FUSE
-transport only grounds cited paths under its signed `coverage_roots`.
+transport only grounds cited paths under its signed `coverage_roots`. The
+application hooks disclose native extension/`ctypes`/subprocess/thread/socket
+blind spots; a pure computation can use `source_requirement="not_applicable"`
+to read `OPAQUE(computed_no_external_source)`, and an HTTP adapter can report
+a completed URL read with `record_url_read()` as application evidence.
 
 ```bash
 uv add mareforma-pro

@@ -262,6 +262,20 @@ with mareforma.open(project, external_grounding_verifier=verifier) as graph:
     )
 ```
 
+The application hooks also expose the blind spots a Python audit hook cannot
+close. Native extension loads, `ctypes` calls, child processes, threads, and
+sockets are reported as explicit OPAQUE reasons instead of being treated as
+complete observation. A pure computation can be labelled with
+`source_requirement="not_applicable"` to name
+`computed_no_external_source`; it remains OPAQUE and does not invent a data
+source. HTTP tools can report an explicit URL read manifest with
+`record_url_read(collector, scope_id, url, response)`, which strips query
+credentials and signs a response digest. That is application evidence, not
+kernel network proof, and external MCP responses still remain
+`OPAQUE(external_mcp)`. Query-specific binding (for example the exact UniProt
+accession) remains the tool adapter's responsibility; the URL identity in the
+receipt deliberately omits the query so presigned secrets cannot leak.
+
 The parser distinguishes a successful `read` from an open that was never read.
 `opened_only` and `unmapped_tmpfs` are fail-closed diagnostics, not a claim that
 the bytes were consumed. A complete trace with a cited read is `GROUNDED`; a

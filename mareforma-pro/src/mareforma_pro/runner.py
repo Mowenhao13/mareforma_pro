@@ -19,7 +19,7 @@ from typing import Mapping, Sequence
 
 from .collector import RootlessCollector
 from .errors import RootlessRunError, RootlessUnavailableError
-from .evidence import OPAQUE_TRACE_INCOMPLETE, ScopeEvidence
+from .evidence import OPAQUE_TRACE_INCOMPLETE, SOURCE_REQUIRED, ScopeEvidence
 from .fuse import FuseReadOnlyProxy
 from .paths import MountResolver
 from .strace import TRACE_EXPR
@@ -154,6 +154,7 @@ class RootlessBwrapRunner:
         keep_log: bool = False,
         traceparent: str | None = None,
         parent_scope_id: str | None = None,
+        source_requirement: str = SOURCE_REQUIRED,
     ) -> RunResult:
         strace = self._require_strace()
         self._require_bwrap()
@@ -190,6 +191,7 @@ class RootlessBwrapRunner:
             resolver,
             traceparent=traceparent,
             parent_scope_id=parent_scope_id,
+            source_requirement=source_requirement,
         )
         error: BaseException | None = None
         proc: subprocess.CompletedProcess[str] | None = None
@@ -274,6 +276,7 @@ class RootlessFuseRunner:
         timeout_sec: float = 60.0,
         traceparent: str | None = None,
         parent_scope_id: str | None = None,
+        source_requirement: str = SOURCE_REQUIRED,
     ) -> FuseRunResult:
         if not command:
             raise ValueError("command must not be empty")
@@ -304,6 +307,7 @@ class RootlessFuseRunner:
             read_semantics="READ_BYTES",
             collector_mode="fuse_read_proxy",
             coverage_roots=(str(proxy.source_root),),
+            source_requirement=source_requirement,
         )
         error: BaseException | None = None
         proc: subprocess.CompletedProcess[str] | None = None

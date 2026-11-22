@@ -46,11 +46,13 @@ def scope_span_from_evidence(
         "mareforma.read_semantics": evidence.read_semantics,
         "mareforma.coverage_roots": list(evidence.coverage_roots),
         "mareforma.observed_files": list(evidence.observed_files),
+        "mareforma.observed_urls": list(evidence.observed_urls),
         "mareforma.opened_only": list(evidence.opened_only),
         "mareforma.opaque_reasons": list(evidence.opaque_reasons),
         "mareforma.payload_digests": list(evidence.payload_digests),
         "mareforma.socket_events": list(evidence.socket_events),
         "mareforma.processes": [dict(p) for p in evidence.processes],
+        "mareforma.source_requirement": evidence.source_requirement,
     }
     if verdict is not None:
         attributes["mareforma.grounding"] = verdict

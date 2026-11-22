@@ -28,6 +28,7 @@ class EvidenceBackend(ABC):
         scope_id: str,
         *,
         observed_files: Iterable[str] = (),
+        observed_urls: Iterable[str] = (),
         observed_dirs: Iterable[str] = (),
         opened_only: Iterable[str] = (),
         payload_digests: Iterable[str] = (),
@@ -64,6 +65,7 @@ class CollectorBackend(EvidenceBackend):
             read_semantics=registration.read_semantics,
             collector_mode=registration.collector_mode,
             coverage_roots=registration.coverage_roots,
+            source_requirement=registration.source_requirement,
         )
 
     def close_and_fetch(self, scope_id: str) -> VerifiedScopeEvidence:
@@ -78,6 +80,7 @@ class CollectorBackend(EvidenceBackend):
         scope_id: str,
         *,
         observed_files: Iterable[str] = (),
+        observed_urls: Iterable[str] = (),
         observed_dirs: Iterable[str] = (),
         opened_only: Iterable[str] = (),
         payload_digests: Iterable[str] = (),
@@ -86,6 +89,7 @@ class CollectorBackend(EvidenceBackend):
         self.collector.ingest_events(
             scope_id,
             observed_files=observed_files,
+            observed_urls=observed_urls,
             observed_dirs=observed_dirs,
             opened_only=opened_only,
             payload_digests=payload_digests,

@@ -1,6 +1,6 @@
 """Rootless, no-sudo observation extension for Mareforma."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .backend import CollectorBackend, EvidenceBackend, InProcessBackend
 from .collector import RootlessCollector
@@ -12,8 +12,16 @@ from .errors import (
     RootlessUnavailableError,
     ScopeError,
 )
-from .evidence import ScopeEvidence, ScopeRegistration, VerifiedScopeEvidence
+from .evidence import (
+    OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE,
+    SOURCE_NOT_APPLICABLE,
+    SOURCE_REQUIRED,
+    ScopeEvidence,
+    ScopeRegistration,
+    VerifiedScopeEvidence,
+)
 from .fuse import FuseReadOnlyProxy
+from .http import record_url_read
 from .jupyter import JupyterCellResult, JupyterScopeHook, audit_scope
 from .mcp import (
     MCPApplicationMiddleware,
@@ -62,6 +70,7 @@ __all__ = [
     "MCPObservation",
     "MareformaProError",
     "MountResolver",
+    "OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE",
     "OTLPSpanExporterAdapter",
     "ParsedStrace",
     "ReceiptError",
@@ -77,6 +86,8 @@ __all__ = [
     "ScopeError",
     "ScopeEvidence",
     "ScopeRegistration",
+    "SOURCE_NOT_APPLICABLE",
+    "SOURCE_REQUIRED",
     "StraceParser",
     "TRACE_EXPR",
     "VerifiedScopeEvidence",
@@ -88,6 +99,7 @@ __all__ = [
     "process_spans_from_evidence",
     "payload_digest",
     "record_mcp_payload",
+    "record_url_read",
     "scope_span_from_evidence",
     "sign_receipt",
     "verdict_from_evidence",

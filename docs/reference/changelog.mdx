@@ -28,6 +28,24 @@ This page mirrors it section for section from v0.3.1 on. v0.3.0 and the
 - **Local collector and application hooks.** The rootless collector exposes
   open/ingest/close over a Unix socket, optional SQLite receipts, Jupyter audit
   hooks, MCP `_meta` correlation, and non-authoritative JSONL/OTLP telemetry.
+- **Expanded application-boundary diagnostics in `mareforma-pro` 0.2.0.** The
+  Python audit hook now records native extension imports, `ctypes.dlopen` /
+  `ctypes.dlsym`, process creation, thread creation, and `socket.connect` as
+  explicit OPAQUE boundaries instead of treating them as complete observation.
+  Pure computations can opt into `source_requirement="not_applicable"`, which
+  yields `OPAQUE(computed_no_external_source)` rather than the ambiguous
+  `no_cited_source`. A new `record_url_read()` helper updates a scope only after
+  an application has a successful HTTP response, strips URL credentials, query
+  strings, and fragments before signing, and records a SHA-256 response digest.
+  URL citations in a generic Python/MCP or FUSE scope with no explicit URL
+  manifest are `OPAQUE(trace_incomplete)`; external MCP responses remain
+  `OPAQUE(external_mcp)`. The new receipt fields are omitted at their defaults,
+  keeping older receipts byte-identical. When the installed core wheel predates
+  the diagnostic fields, `mareforma-pro` keeps the decision fail-closed by
+  folding `opaque_reasons`, `read_semantics`, and `evidence_level` into the
+  verdict reason, and `RootlessObservation.opaque_reasons` reconstructs them
+  from the seams. This keeps standalone Pro usable with the published core
+  `0.4.0` wheel as well as the current checkout.
 - **Optional rootless FUSE transport.** `FuseReadOnlyProxy` speaks the Linux
   `/dev/fuse` protocol directly and uses `fusermount3` only for the
   unprivileged mount. `RootlessFuseRunner` binds the read-only view into

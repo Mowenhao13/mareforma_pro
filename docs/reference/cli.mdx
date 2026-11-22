@@ -813,7 +813,9 @@ separately from read-opens, signs a `mareforma_pro.rootless_receipt/v1` receipt,
 and prints the matching Mareforma grounding record. A cited file opened but not
 read is `OPAQUE(open_only)`; an unmapped temporary mount is
 `OPAQUE(unmapped_tmpfs)`; a rejected HMAC receipt is
-`OPAQUE(unsigned_declared)`.
+`OPAQUE(unsigned_declared)`. `--source-requirement not_applicable` labels a pure
+computation as `OPAQUE(computed_no_external_source)`; it remains OPAQUE and
+does not manufacture a data source.
 
 ### mareforma-pro serve
 
@@ -852,7 +854,11 @@ pass `--keep-source-visible` only for debugging. The receipt says
 `read_semantics=READ_BYTES`. A successful non-empty FUSE read grounds a cited
 host path; an open without a read is `OPAQUE(open_only)`. Because the receipt
 also signs `coverage_roots`, a citation outside `--source` is
-`OPAQUE(unmapped_sandbox_path)` rather than a confident `UNGROUNDED`.
+`OPAQUE(unmapped_sandbox_path)` rather than a confident `UNGROUNDED`. A URL
+citation in a FUSE or generic Python/MCP scope with no explicit application URL
+manifest is `OPAQUE(trace_incomplete)`, because a FUSE coverage root describes
+files, not network delivery. `--source-requirement not_applicable` is available
+for a pure-computation run.
 
 `fusermount3` is a setuid system helper used only to obtain the unprivileged
 mount. It does not grant the target root, and no `sudo` prompt is involved.

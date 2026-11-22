@@ -11,6 +11,8 @@ from .errors import ScopeError
 from .evidence import (
     RECEIPT_SCHEMA,
     OPAQUE_TRACE_INCOMPLETE,
+    SOURCE_REQUIRED,
+    SOURCE_REQUIREMENTS,
     ScopeEvidence,
     VerifiedScopeEvidence,
     normalize_many,
@@ -27,6 +29,7 @@ class ScopeRecord:
     resolver: MountResolver
     opened_at: float = field(default_factory=time.time)
     observed_files: set[str] = field(default_factory=set)
+    observed_urls: set[str] = field(default_factory=set)
     observed_dirs: set[str] = field(default_factory=set)
     opened_only: set[str] = field(default_factory=set)
     unmapped_paths: set[str] = field(default_factory=set)
@@ -40,6 +43,7 @@ class ScopeRecord:
     read_semantics: str = "READ_INTENT"
     collector_mode: str | None = None
     coverage_roots: set[str] = field(default_factory=set)
+    source_requirement: str = SOURCE_REQUIRED
     trace_complete: bool = True
 
     def merge(self, parsed: ParsedStrace) -> None:
@@ -100,6 +104,7 @@ class RootlessCollector:
         read_semantics: str = "READ_INTENT",
         collector_mode: str | None = None,
         coverage_roots: Iterable[str] = (),
+        source_requirement: str = SOURCE_REQUIRED,
     ) -> None:
         if not scope_id:
             raise ScopeError("scope_id must not be empty")
@@ -107,6 +112,11 @@ class RootlessCollector:
             raise ScopeError(f"scope already open: {scope_id}")
         if scope_id in self._closed:
             raise ScopeError(f"scope already closed: {scope_id}")
+        if source_requirement not in SOURCE_REQUIREMENTS:
+            raise ScopeError(
+                "source_requirement must be one of: "
+                + ", ".join(sorted(SOURCE_REQUIREMENTS))
+            )
         if resolver is None:
             resolver = MountResolver.from_mounts(
                 mount_map or {},
@@ -124,6 +134,7 @@ class RootlessCollector:
             read_semantics=read_semantics,
             collector_mode=collector_mode,
             coverage_roots=set(normalize_many(coverage)),
+            source_requirement=source_requirement,
         )
 
     def _record(self, scope_id: str) -> ScopeRecord:
@@ -158,6 +169,7 @@ class RootlessCollector:
         scope_id: str,
         *,
         observed_files: Iterable[str] = (),
+        observed_urls: Iterable[str] = (),
         observed_dirs: Iterable[str] = (),
         opened_only: Iterable[str] = (),
         payload_digests: Iterable[str] = (),
@@ -165,12 +177,15 @@ class RootlessCollector:
     ) -> None:
         record = self._record(scope_id)
         files = normalize_many(observed_files)
+        urls = normalize_many(observed_urls)
         dirs = normalize_many(observed_dirs)
         opened = normalize_many(opened_only)
         record.observed_files.update(files)
+        record.observed_urls.update(urls)
         record.observed_dirs.update(dirs)
         record.opened_only.update(opened)
         record.opened_only.difference_update(record.observed_files)
+        record.opened_only.difference_update(record.observed_urls)
         record.payload_digests.update(str(value) for value in payload_digests if value)
         record.opaque_reasons.update(str(value) for value in opaque_reasons if value)
 
@@ -180,6 +195,7 @@ class RootlessCollector:
         evidence = ScopeEvidence(
             scope_id=scope_id,
             observed_files=tuple(sorted(record.observed_files)),
+            observed_urls=tuple(sorted(record.observed_urls)),
             observed_dirs=tuple(sorted(record.observed_dirs)),
             opened_only=tuple(sorted(record.opened_only)),
             unmapped_paths=tuple(sorted(record.unmapped_paths)),
@@ -205,6 +221,7 @@ class RootlessCollector:
             traceparent=record.traceparent,
             parent_scope_id=record.parent_scope_id,
             coverage_roots=tuple(sorted(record.coverage_roots)),
+            source_requirement=record.source_requirement,
         )
         unsigned = evidence.to_receipt_dict()
         signed = sign_receipt(unsigned, self._secret)

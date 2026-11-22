@@ -7,10 +7,35 @@ The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma
 This page mirrors it section for section from v0.3.1 on. v0.3.0 and the
 0.2.x line are summarized here; read CHANGELOG.md for their full entries.
 
+## [mareforma-pro 0.4.1] - 2026-11-23
+
+### Fixed
+
+- **MCP Streamable HTTP GET/DELETE compatibility.** The official MCP Python
+  SDK opens `GET /mcp` after `notifications/initialized` and keeps that SSE
+  response open for server-initiated messages. Treating the GET as a normal
+  serialized call reserved the only worker for the lifetime of the stream, so
+  the next `tools/list` timed out and received `503 Service Unavailable`.
+  The supervisor now forwards `GET` and `DELETE` as transport/session
+  operations without taking a call reservation, forwards SSE bytes with
+  `HTTPResponse.read1()` instead of buffering for a full read, and marks any
+  POST that overlaps a live GET as `OPAQUE(concurrent_call_overlap)`. Both
+  standard MCP SDK sessions and plain clients can use the same public port;
+  no `mareforma_pro` installation is required on the client.
+
 ## Unreleased
 
 ### Added
 
+- **`mareforma-pro` 0.4.0+ long-running MCP supervisor.** The new
+  `mareforma-pro supervise` command listens on public port `18100` while the
+  original server keeps its fixed internal port `18000`. A FIFO-fed `strace`
+  stream, serial worker gate, signed Call/Session receipts, optional egress
+  proxy, and Python `sitecustomize` DB/URL hooks make the server observable
+  without changing its source. A Python `bind()` redirect can preserve an
+  existing `0.0.0.0` endpoint while the fixed-port child moves to an internal
+  loopback port. HTTPS without a trusted local MITM CA remains authority level
+  only, and every unobserved channel stays OPAQUE.
 - **Independent `mareforma-pro` distribution.** The rootless extension now
   ships from its own `mareforma-pro` project with the `mareforma_pro` import
   package and `mareforma-pro` entry point. It declares core
@@ -58,6 +83,17 @@ This page mirrors it section for section from v0.3.1 on. v0.3.0 and the
   process can verify a full external receipt and mint the normal grounding
   verdict. Without one, a raw external receipt is stored as
   `DECLARED`/`OPAQUE(unsigned_declared)`, never as `GROUNDED`.
+
+### Fixed
+
+- **MCP supervisor concurrent-client isolation.** The worker pool now reserves
+  an idle worker and records session affinity under one condition. Previously
+  an affinity request and an anonymous request could both observe the same
+  idle worker, producing `502 {"error": "worker already has an active call"}`
+  under concurrent `initialize` calls. The error path also only finalizes a
+  call after `begin_call()` succeeded. Regression tests cover single-worker
+  affinity, multi-worker reservation, and waiter wake-up; an 8-client staging
+  and production probe both complete with 10 tools per client and no 502.
 
 ## v0.4.0
 

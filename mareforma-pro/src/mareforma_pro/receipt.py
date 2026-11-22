@@ -51,16 +51,40 @@ def canonical_bytes(payload: Mapping[str, Any]) -> bytes:
 
 
 def sign_receipt(payload: Mapping[str, Any], secret: str | bytes) -> str:
-    digest = hmac.new(_secret_bytes(secret), RECEIPT_DOMAIN + canonical_bytes(payload), hashlib.sha256)
+    return sign_payload(payload, secret, domain=RECEIPT_DOMAIN)
+
+
+def sign_payload(
+    payload: Mapping[str, Any],
+    secret: str | bytes,
+    *,
+    domain: bytes = RECEIPT_DOMAIN,
+) -> str:
+    """Sign any canonical receipt-like payload under an explicit domain.
+
+    The rootless scope receipt keeps its historical call shape. Call and
+    session receipts use distinct domains so a signature minted for one
+    lifecycle cannot be replayed as another.
+    """
+    digest = hmac.new(_secret_bytes(secret), domain + canonical_bytes(payload), hashlib.sha256)
     return "hmac-sha256:" + digest.hexdigest()
 
 
 def verify_signature(payload: Mapping[str, Any], secret: str | bytes) -> bool:
+    return verify_payload(payload, secret, domain=RECEIPT_DOMAIN)
+
+
+def verify_payload(
+    payload: Mapping[str, Any],
+    secret: str | bytes,
+    *,
+    domain: bytes = RECEIPT_DOMAIN,
+) -> bool:
     provided = payload.get("hmac_signature") if isinstance(payload, Mapping) else None
     if not isinstance(provided, str) or not provided.startswith("hmac-sha256:"):
         return False
     try:
-        expected = sign_receipt(payload, secret)
+        expected = sign_payload(payload, secret, domain=domain)
     except (TypeError, ValueError):
         return False
     return hmac.compare_digest(expected, provided)

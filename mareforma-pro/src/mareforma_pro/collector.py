@@ -30,9 +30,12 @@ class ScopeRecord:
     opened_at: float = field(default_factory=time.time)
     observed_files: set[str] = field(default_factory=set)
     observed_urls: set[str] = field(default_factory=set)
+    observed_egress_urls: set[str] = field(default_factory=set)
     observed_dirs: set[str] = field(default_factory=set)
     opened_only: set[str] = field(default_factory=set)
     unmapped_paths: set[str] = field(default_factory=set)
+    internal_temp_files: set[str] = field(default_factory=set)
+    observed_db_queries: list[dict[str, Any]] = field(default_factory=list)
     opaque_reasons: set[str] = field(default_factory=set)
     payload_digests: set[str] = field(default_factory=set)
     processes: list[dict[str, Any]] = field(default_factory=list)
@@ -50,6 +53,7 @@ class ScopeRecord:
         self.observed_files.update(parsed.observed_files)
         self.observed_dirs.update(parsed.observed_dirs)
         self.opened_only.update(parsed.opened_only)
+        self.internal_temp_files.update(getattr(parsed, "internal_temp_files", ()))
         self.unmapped_paths.update(parsed.unmapped_paths)
         self.opaque_reasons.update(parsed.opaque_reasons)
         self.processes.extend(parsed.processes)
@@ -170,22 +174,35 @@ class RootlessCollector:
         *,
         observed_files: Iterable[str] = (),
         observed_urls: Iterable[str] = (),
+        observed_egress_urls: Iterable[str] = (),
         observed_dirs: Iterable[str] = (),
         opened_only: Iterable[str] = (),
+        internal_temp_files: Iterable[str] = (),
+        observed_db_queries: Iterable[Mapping[str, Any]] = (),
         payload_digests: Iterable[str] = (),
         opaque_reasons: Iterable[str] = (),
     ) -> None:
         record = self._record(scope_id)
         files = normalize_many(observed_files)
         urls = normalize_many(observed_urls)
+        egress_urls = normalize_many(observed_egress_urls)
         dirs = normalize_many(observed_dirs)
         opened = normalize_many(opened_only)
+        temp_files = normalize_many(internal_temp_files)
         record.observed_files.update(files)
         record.observed_urls.update(urls)
+        record.observed_egress_urls.update(egress_urls)
         record.observed_dirs.update(dirs)
         record.opened_only.update(opened)
+        record.internal_temp_files.update(temp_files)
         record.opened_only.difference_update(record.observed_files)
         record.opened_only.difference_update(record.observed_urls)
+        for item in observed_db_queries:
+            if not isinstance(item, Mapping):
+                raise ValueError("observed_db_queries entries must be mappings")
+            row = dict(item)
+            if row not in record.observed_db_queries:
+                record.observed_db_queries.append(row)
         record.payload_digests.update(str(value) for value in payload_digests if value)
         record.opaque_reasons.update(str(value) for value in opaque_reasons if value)
 
@@ -196,8 +213,13 @@ class RootlessCollector:
             scope_id=scope_id,
             observed_files=tuple(sorted(record.observed_files)),
             observed_urls=tuple(sorted(record.observed_urls)),
+            observed_egress_urls=tuple(sorted(record.observed_egress_urls)),
             observed_dirs=tuple(sorted(record.observed_dirs)),
             opened_only=tuple(sorted(record.opened_only)),
+            internal_temp_files=tuple(sorted(record.internal_temp_files)),
+            observed_db_queries=tuple(
+                sorted(record.observed_db_queries, key=lambda row: repr(sorted(row.items())))
+            ),
             unmapped_paths=tuple(sorted(record.unmapped_paths)),
             opaque_reasons=tuple(sorted(record.opaque_reasons)),
             payload_digests=tuple(sorted(record.payload_digests)),

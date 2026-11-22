@@ -1,6 +1,6 @@
 """Rootless, no-sudo observation extension for Mareforma."""
 
-__version__ = "0.2.0"
+__version__ = "0.4.1"
 
 from .backend import CollectorBackend, EvidenceBackend, InProcessBackend
 from .collector import RootlessCollector
@@ -14,6 +14,11 @@ from .errors import (
 )
 from .evidence import (
     OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE,
+    OPAQUE_CONCURRENT_CALL_OVERLAP,
+    OPAQUE_DB_UNINSPECTED,
+    OPAQUE_EGRESS_PROXY_BYPASSED,
+    OPAQUE_EGRESS_UNINSPECTED,
+    OPAQUE_HTTPS_PATH_OPAQUE,
     SOURCE_NOT_APPLICABLE,
     SOURCE_REQUIRED,
     ScopeEvidence,
@@ -22,6 +27,8 @@ from .evidence import (
 )
 from .fuse import FuseReadOnlyProxy
 from .http import record_url_read
+from .egress import EgressObservation, EgressProxy
+from .dbproxy import DatabaseObservation, LocalTCPRelay, engine_for_port, parse_relay_targets, rewrite_database_env
 from .jupyter import JupyterCellResult, JupyterScopeHook, audit_scope
 from .mcp import (
     MCPApplicationMiddleware,
@@ -43,21 +50,54 @@ from .observe import (
 from .otel import (
     AsyncJsonlSpanExporter,
     OTLPSpanExporterAdapter,
+    call_span_from_receipt,
     process_spans_from_evidence,
     scope_span_from_evidence,
+    session_span_from_receipt,
 )
 from .paths import MountResolver
 from .receipt import sign_receipt, verify_scope_receipt, verify_signature
 from .runner import FuseRunResult, RootlessBwrapRunner, RootlessFuseRunner, RunResult
 from .server import CollectorClient, CollectorServer
+from .mcp_receipts import (
+    CALL_RECEIPT_DOMAIN,
+    CALL_RECEIPT_SCHEMA,
+    SESSION_RECEIPT_DOMAIN,
+    SESSION_RECEIPT_SCHEMA,
+    CallReceipt,
+    SessionReceipt,
+    build_call_receipt,
+    build_session_receipt,
+    receipt_digest,
+    sign_call_receipt,
+    sign_payload,
+    verify_call_receipt,
+    verify_session_receipt,
+)
+from .supervisor import MCPProcessSupervisor, WorkerConfig, rewrite_command_port
 from .store import ReceiptStore
-from .strace import TRACE_EXPR, ParsedStrace, StraceParser, parse_strace
+from .strace import (
+    SUPERVISOR_TRACE_EXPR,
+    TRACE_EXPR,
+    ParsedStrace,
+    StraceEvent,
+    StraceParser,
+    parse_strace,
+)
 
 __all__ = [
     "AsyncJsonlSpanExporter",
+    "call_span_from_receipt",
+    "CALL_RECEIPT_DOMAIN",
+    "CALL_RECEIPT_SCHEMA",
+    "CallReceipt",
     "CollectorBackend",
     "CollectorClient",
     "CollectorServer",
+    "EgressObservation",
+    "EgressProxy",
+    "DatabaseObservation",
+    "LocalTCPRelay",
     "EvidenceBackend",
     "FuseMountError",
     "FuseReadOnlyProxy",
@@ -68,9 +108,15 @@ __all__ = [
     "MCPApplicationMiddleware",
     "MCPContext",
     "MCPObservation",
+    "MCPProcessSupervisor",
     "MareformaProError",
     "MountResolver",
     "OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE",
+    "OPAQUE_CONCURRENT_CALL_OVERLAP",
+    "OPAQUE_DB_UNINSPECTED",
+    "OPAQUE_EGRESS_PROXY_BYPASSED",
+    "OPAQUE_EGRESS_UNINSPECTED",
+    "OPAQUE_HTTPS_PATH_OPAQUE",
     "OTLPSpanExporterAdapter",
     "ParsedStrace",
     "ReceiptError",
@@ -88,22 +134,40 @@ __all__ = [
     "ScopeRegistration",
     "SOURCE_NOT_APPLICABLE",
     "SOURCE_REQUIRED",
+    "SESSION_RECEIPT_DOMAIN",
+    "SESSION_RECEIPT_SCHEMA",
+    "SessionReceipt",
+    "StraceEvent",
     "StraceParser",
     "TRACE_EXPR",
+    "SUPERVISOR_TRACE_EXPR",
+    "WorkerConfig",
     "VerifiedScopeEvidence",
     "assert_claim_from_receipt",
     "audit_scope",
     "inject_meta",
+    "build_call_receipt",
+    "build_session_receipt",
     "observe",
     "parse_strace",
+    "parse_relay_targets",
     "process_spans_from_evidence",
     "payload_digest",
     "record_mcp_payload",
     "record_url_read",
+    "engine_for_port",
+    "rewrite_database_env",
+    "receipt_digest",
+    "rewrite_command_port",
+    "sign_call_receipt",
+    "sign_payload",
     "scope_span_from_evidence",
+    "session_span_from_receipt",
     "sign_receipt",
     "verdict_from_evidence",
     "verdict_or_opaque",
+    "verify_call_receipt",
+    "verify_session_receipt",
     "verify_and_verdict",
     "verify_scope_receipt",
     "verify_signature",

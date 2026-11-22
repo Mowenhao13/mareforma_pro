@@ -863,6 +863,95 @@ for a pure-computation run.
 `fusermount3` is a setuid system helper used only to obtain the unprivileged
 mount. It does not grant the target root, and no `sudo` prompt is involved.
 
+### mareforma-pro supervise
+
+```bash
+mareforma-pro supervise \
+  --port 18100 \
+  --internal-port 18000 \
+  --workers 1 \
+  --egress-proxy \
+  --db-hook \
+  -- /path/to/server-venv/bin/python /path/to/mcp_server.py
+```
+
+`supervise` is the 0.4.0+ long-running path for an unchanged HTTP MCP server. It
+listens on public port `18100` by default and starts the original command on
+its fixed internal loopback port `18000`. MCP clients connect to the
+supervisor on `18100`; do not connect directly to the internal server. The
+server command may use `{external_port}` or `{internal_port}` placeholders, or
+the common `--port <public-port>` form is rewritten automatically. `PORT`,
+`MCP_PORT`, `UVICORN_PORT`, and `MCP_SERVER_PORT` are set to the internal port,
+and the matching `HOST` / `MCP_HOST` / `UVICORN_HOST` / `MCP_SERVER_HOST`
+variables are set to loopback for environment-driven servers.
+
+When the server hard-codes `18000`, leave its command unchanged and use
+`--workers 1`; only one process can bind that fixed port. To run multiple
+workers, point the server at `{internal_port}` (or rewrite it with
+`--internal-port`) and give each worker a distinct port.
+
+To keep the remote endpoint unchanged, use the same port on distinct bind
+addresses. The child stays on `127.0.0.1:18000`; the Supervisor binds the
+concrete address that remote clients already use:
+
+```bash
+mareforma-pro supervise \
+  --host 10.12.112.230 --port 18000 \
+  --internal-port 18000 \
+  --workers 1 --egress-proxy --db-hook \
+  -- /path/to/server-venv/bin/python /path/to/mcp_server.py
+```
+
+Remote clients can keep using `http://10.12.112.230:18000`. The public and
+internal ports may match only when their bind hosts differ; a wildcard public
+bind such as `0.0.0.0` is refused. Clients that connect through loopback hit
+the child directly and bypass the receipt boundary.
+
+For a Python server that hard-codes `0.0.0.0:18000` and must keep the wildcard
+endpoint, use runtime bind redirection:
+
+```bash
+mareforma-pro supervise \
+  --host 0.0.0.0 --port 18000 \
+  --internal-port 18100 \
+  --bind-rewrite-port 18000 \
+  --workers 1 --egress-proxy --db-hook \
+  -- /path/to/server-venv/bin/python /path/to/mcp_server.py
+```
+
+`--bind-rewrite-port` prepends the Python autohook and redirects only an IPv4
+`bind()` matching that exact port to the internal loopback endpoint. The hook
+does not cover a non-Python server or a Python process started with `-S`.
+
+A server that imports a large catalog can take longer than the default 30-second
+ready timeout. Pass `--ready-timeout 240` or higher and allow the same margin in
+the surrounding service manager. The supervisor does not declare the public
+port ready until the internal process accepts a TCP connection.
+
+Each POST request gets an HMAC-signed `CallReceipt` in the receipt journal
+(`~/.mareforma/mcp-receipts.jsonl` by default); idle sessions and shutdown get
+a `SessionReceipt`. Use `--otel-jsonl` for non-authoritative call/session span
+events. `--no-strace` is a diagnostic mode and always leaves
+`OPAQUE(trace_incomplete)` because no process evidence was captured.
+
+The official MCP Streamable HTTP client opens a long-lived `GET /mcp` SSE
+stream after `notifications/initialized` and sends `DELETE /mcp` when the
+session closes. The supervisor forwards `GET` and `DELETE` without reserving
+the serialized call worker. This keeps standard SDK clients working while
+preserving the one-call-at-a-time evidence boundary for POST requests. If a
+POST overlaps a live GET, its receipt carries
+`OPAQUE(concurrent_call_overlap)` instead of claiming exclusive process
+attribution.
+
+`--db-hook` prepends the package's `sitecustomize.py` to `PYTHONPATH` and hooks
+SQLite queries plus common Python HTTP clients. It is optional and does not
+cover arbitrary native DB drivers. `--egress-proxy` injects
+`HTTP_PROXY`/`HTTPS_PROXY`; plain HTTP URLs are visible, while HTTPS reports
+the CONNECT authority and `OPAQUE(https_path_opaque)` unless the deployment
+adds a trusted local MITM CA. Direct external connections are reconciled
+against `strace connect()` and become `egress_proxy_bypassed` or
+`egress_uninspected` when the proxy is bypassed or disabled.
+
 ### mareforma-pro demo
 
 ```bash

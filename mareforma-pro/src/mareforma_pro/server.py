@@ -155,8 +155,11 @@ class CollectorServer:
                         scope_id,
                         observed_files=request.get("observed_files") or (),
                         observed_urls=request.get("observed_urls") or (),
+                        observed_egress_urls=request.get("observed_egress_urls") or (),
                         observed_dirs=request.get("observed_dirs") or (),
                         opened_only=request.get("opened_only") or (),
+                        internal_temp_files=request.get("internal_temp_files") or (),
+                        observed_db_queries=request.get("observed_db_queries") or (),
                         payload_digests=request.get("payload_digests") or (),
                         opaque_reasons=request.get("opaque_reasons") or (),
                     )

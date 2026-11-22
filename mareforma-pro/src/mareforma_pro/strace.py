@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import posixpath
 import re
-from typing import Iterable
+from typing import Callable, Iterable, Mapping
 
 from .evidence import (
     OPAQUE_OPEN_ONLY,
@@ -47,6 +48,25 @@ TRACE_SYSCALLS = (
 )
 TRACE_EXPR = ",".join(TRACE_SYSCALLS)
 
+# The long-running supervisor enables a wider trace than the short-task
+# runner. In particular, writes are needed to tell a request-created temp file
+# from a pre-existing temp file that arrived from outside the request.
+SUPERVISOR_TRACE_SYSCALLS = TRACE_SYSCALLS + (
+    "write",
+    "pwrite64",
+    "writev",
+    "pwritev",
+    "pwritev2",
+    "unlink",
+    "unlinkat",
+    "rename",
+    "renameat",
+    "renameat2",
+    "memfd_create",
+    "mmap",
+)
+SUPERVISOR_TRACE_EXPR = ",".join(SUPERVISOR_TRACE_SYSCALLS)
+
 OPEN_CALLS = frozenset({"open", "openat", "openat2"})
 READ_CALLS = frozenset({"read", "pread64", "readv", "preadv", "preadv2"})
 EXEC_CALLS = frozenset({"execve", "execveat"})
@@ -54,6 +74,8 @@ CLONE_CALLS = frozenset({"clone", "clone3", "fork", "vfork"})
 SOCKET_CALLS = frozenset(
     {"connect", "sendto", "recvfrom", "sendmsg", "recvmsg", "sendmmsg", "recvmmsg"}
 )
+WRITE_CALLS = frozenset({"write", "pwrite64", "writev", "pwritev", "pwritev2"})
+MMAP_CALLS = frozenset({"mmap"})
 
 _LINE = re.compile(r"^(?:\[pid\s+(\d+)\]|(\d+))\s+(.*)$")
 _UNFINISHED = re.compile(r"^([A-Za-z0-9_]+)\((.*)<unfinished \.\.\.>$")
@@ -67,6 +89,15 @@ _FLAG_WRITE = re.compile(r"\bO_WRONLY\b")
 _FLAG_RDWR = re.compile(r"\bO_RDWR\b")
 _FLAG_DIR = re.compile(r"\bO_DIRECTORY\b")
 _FLAG_PATH = re.compile(r"\bO_PATH\b")
+_INET4 = re.compile(
+    r"sin_port=htons\((?P<port>\d+)\).*?sin_addr=inet_addr\(\"(?P<addr>[^\"]+)\"\)"
+)
+_INET6 = re.compile(
+    r"sin6_port=htons\((?P<port>\d+)\).*?sin6_addr=inet_pton\(AF_INET6,\s*\"(?P<addr>[^\"]+)\"\)"
+)
+_UNIX_SOCK = re.compile(r"sun_path=\"(?P<path>[^\"]+)\"")
+
+TEMP_PREFIXES = ("/tmp", "/var/tmp", "/dev/shm", "/run/user")
 
 
 def _decode_quoted(value: str) -> str:
@@ -85,6 +116,60 @@ def _last_quoted(args: str) -> tuple[str | None, int]:
     if last is None:
         return None, -1
     return _decode_quoted(last.group(1)), end
+
+
+def _connect_endpoint(args: str) -> str | None:
+    """Best-effort stable endpoint identity from a connect(2) argument."""
+    match = _INET6.search(args)
+    if match is not None:
+        return f"tcp:[{match.group('addr')}]:{match.group('port')}"
+    match = _INET4.search(args)
+    if match is not None:
+        return f"tcp:{match.group('addr')}:{match.group('port')}"
+    match = _UNIX_SOCK.search(args)
+    if match is not None:
+        return f"unix:{match.group('path')}"
+    return None
+
+
+def _is_temp_path(path: str | None) -> bool:
+    if not path or not path.startswith("/"):
+        return False
+    norm = posixpath.normpath(path)
+    return any(norm == prefix or norm.startswith(prefix + "/") for prefix in TEMP_PREFIXES)
+
+
+def is_temp_path(path: str | None) -> bool:
+    return _is_temp_path(path)
+
+
+def _is_write_open(flags: str) -> bool:
+    return bool(
+        _FLAG_WRITE.search(flags)
+        or _FLAG_RDWR.search(flags)
+        or re.search(r"\bO_TRUNC\b|\bO_APPEND\b|\bO_CREAT\b", flags)
+    )
+
+
+@dataclass(frozen=True)
+class StraceEvent:
+    """One deterministic event delivered to the long-running supervisor.
+
+    The legacy parser aggregates events into :class:`ParsedStrace`. The stream
+    path also needs the ordered event stream so a call can be sealed without
+    guessing from a process-wide aggregate.
+    """
+
+    syscall: str
+    pid: int
+    kind: str
+    path: str | None = None
+    resolved_path: str | None = None
+    fd: int | None = None
+    bytes: int = 0
+    endpoint: str | None = None
+    success: bool = True
+    is_dir: bool = False
 
 
 def _first_quoted(args: str) -> str | None:
@@ -121,6 +206,11 @@ class ParsedStrace:
     opaque_reasons: set[str] = field(default_factory=set)
     processes: list[dict[str, object]] = field(default_factory=list)
     socket_events: list[str] = field(default_factory=list)
+    connect_events: list[str] = field(default_factory=list)
+    internal_temp_files: set[str] = field(default_factory=set)
+    written_files: set[str] = field(default_factory=set)
+    observed_db_queries: list[dict[str, object]] = field(default_factory=list)
+    events: list[StraceEvent] = field(default_factory=list)
     pids: set[int] = field(default_factory=set)
     read_bytes: int = 0
     opened_readable_events: int = 0
@@ -134,18 +224,39 @@ class _OpenRecord:
     resolved_path: str | None
     is_dir: bool
     unmapped_reason: str | None
+    readable: bool = False
+    writable: bool = False
 
 
 class StraceParser:
     """Stateful parser for one interleaved ``strace -f`` log."""
 
-    def __init__(self, resolver: MountResolver) -> None:
+    def __init__(
+        self,
+        resolver: MountResolver,
+        *,
+        track_temp_semantics: bool = False,
+        event_sink: Callable[[StraceEvent], None] | None = None,
+    ) -> None:
         self.resolver = resolver
+        self.track_temp_semantics = track_temp_semantics
+        self.event_sink = event_sink
         self.result = ParsedStrace()
         # pending unfinished call prefix keyed by pid
         self._pending: dict[str, tuple[str, str]] = {}
         # fd -> open metadata keyed by (pid, fd)
         self._fd: dict[tuple[int, int], _OpenRecord] = {}
+
+    def _emit(self, event: StraceEvent) -> None:
+        self.result.events.append(event)
+        if self.event_sink is None:
+            return
+        try:
+            self.event_sink(event)
+        except Exception:
+            # A streaming consumer must never tear down the target trace. The
+            # receipt will disclose an incomplete trace instead.
+            self.result.opaque_reasons.add(OPAQUE_TRACE_INCOMPLETE)
 
     def feed(self, lines: Iterable[str]) -> ParsedStrace:
         for raw in lines:
@@ -196,6 +307,15 @@ class StraceParser:
                         "binary": binary or "<unknown>",
                     }
                 )
+                self._emit(
+                    StraceEvent(
+                        syscall=syscall,
+                        pid=pid,
+                        kind="exec",
+                        path=binary,
+                        resolved_path=binary,
+                    )
+                )
             return
 
         if syscall in CLONE_CALLS:
@@ -211,11 +331,30 @@ class StraceParser:
                 self.result.processes.append(
                     {"pid": child, "parent_pid": pid, "syscall": syscall}
                 )
+                self._emit(
+                    StraceEvent(
+                        syscall=syscall,
+                        pid=pid,
+                        kind="clone",
+                        bytes=child,
+                    )
+                )
             return
 
         if syscall in SOCKET_CALLS:
             if result != "-1":
                 self.result.socket_events.append(syscall)
+                endpoint = _connect_endpoint(args) if syscall == "connect" else None
+                if endpoint is not None:
+                    self.result.connect_events.append(endpoint)
+                    self._emit(
+                        StraceEvent(
+                            syscall=syscall,
+                            pid=pid,
+                            kind="connect",
+                            endpoint=endpoint,
+                        )
+                    )
             return
 
         if syscall in OPEN_CALLS:
@@ -224,6 +363,19 @@ class StraceParser:
 
         if syscall in READ_CALLS:
             self._handle_read(pid, args, result)
+            return
+
+        if syscall in WRITE_CALLS:
+            self._handle_write(pid, args, result)
+            return
+
+        if syscall in MMAP_CALLS:
+            # A readable mmap is a genuine data path that ordinary read(2)
+            # tracing cannot validate. Preserve the fact instead of reporting a
+            # clean absence later.
+            if result != "-1" and "PROT_READ" in args:
+                self.result.opaque_reasons.add(OPAQUE_TRACE_INCOMPLETE)
+            return
 
     def _handle_open(self, pid: int, args: str, result: str) -> None:
         fd, annotated_path = _fd_from_result(result)
@@ -235,9 +387,10 @@ class StraceParser:
         flags_segment = args[quote_end:] if quote_end >= 0 else args
         if _FLAG_PATH.search(flags_segment):
             return
-        if _FLAG_WRITE.search(flags_segment) and not _FLAG_RDWR.search(flags_segment):
+        writable = _is_write_open(flags_segment)
+        readable = not (_FLAG_WRITE.search(flags_segment) and not _FLAG_RDWR.search(flags_segment))
+        if writable and not readable:
             self.result.skipped_writes += 1
-            return
 
         is_dir = bool(_FLAG_DIR.search(flags_segment))
         # Prefer the path argument.  ``-y`` can print an fd path that includes a
@@ -250,8 +403,26 @@ class StraceParser:
             resolved_path=resolution.resolved,
             is_dir=is_dir,
             unmapped_reason=resolution.opaque_reason,
+            readable=readable,
+            writable=writable,
         )
         self._fd[(pid, fd)] = record
+        if writable and resolution.resolved is not None:
+            self.result.written_files.add(resolution.resolved)
+        self._emit(
+            StraceEvent(
+                syscall="openat",
+                pid=pid,
+                kind="open_write" if writable and not readable else "open",
+                path=namespace_path,
+                resolved_path=resolution.resolved,
+                fd=fd,
+                success=resolution.resolved is not None,
+                is_dir=is_dir,
+            )
+        )
+        if not readable:
+            return
         self.result.opened_readable_events += 1
 
         if resolution.ignored:
@@ -303,17 +474,83 @@ class StraceParser:
             return
         if resolved is None:
             if resolution is not None and resolution.opaque_reason is not None:
-                self.result.unmapped_paths.add(path or "<unknown>")
-                self.result.opaque_reasons.add(resolution.opaque_reason)
+                if not (
+                    self.track_temp_semantics
+                    and _is_temp_path(path)
+                    and path in self.result.written_files
+                ):
+                    self.result.unmapped_paths.add(path or "<unknown>")
+                    self.result.opaque_reasons.add(resolution.opaque_reason)
             return
+        temp = _is_temp_path(resolved)
+        if temp and self.track_temp_semantics:
+            if resolved in self.result.written_files:
+                self.result.internal_temp_files.add(resolved)
+            else:
+                self.result.unmapped_paths.add(resolved)
+                self.result.opaque_reasons.add(OPAQUE_UNMAPPED_TMPFS)
         self.result.observed_files.add(resolved)
         self.result.read_bytes += count
+        self._emit(
+            StraceEvent(
+                syscall="read",
+                pid=pid,
+                kind="read",
+                path=path,
+                resolved_path=resolved,
+                fd=fd,
+                bytes=count,
+            )
+        )
+        if temp and self.track_temp_semantics and resolved in self.result.written_files:
+            self.result.internal_temp_files.add(resolved)
+        if resolved.endswith((".db", ".sqlite", ".sqlite3", ".duckdb")):
+            self.result.observed_db_queries.append(
+                {
+                    "engine": "embedded",
+                    "database": resolved,
+                    "operation": "read",
+                    "query": None,
+                    "evidence": "openat+read",
+                }
+            )
         # A file that was opened readable and then read is no longer open-only.
         self.result.opened_readable.discard(resolved)
 
+    def _handle_write(self, pid: int, args: str, result: str) -> None:
+        fd, annotated_path = _fd_from_read(args)
+        if fd is None:
+            return
+        try:
+            count = int(result.split()[0])
+        except (ValueError, IndexError):
+            return
+        if count <= 0:
+            return
+        record = self._fd.get((pid, fd))
+        path = record.namespace_path if record is not None else annotated_path
+        resolved = record.resolved_path if record is not None else None
+        if resolved is None and path:
+            resolution = self.resolver.resolve(path)
+            resolved = resolution.resolved
+        if resolved is None:
+            return
+        self.result.written_files.add(resolved)
+        self._emit(
+            StraceEvent(
+                syscall="write",
+                pid=pid,
+                kind="write",
+                path=path,
+                resolved_path=resolved,
+                fd=fd,
+                bytes=count,
+            )
+        )
+
     def finish(self) -> None:
         for syscall, _prefix in self._pending.values():
-            if syscall in OPEN_CALLS or syscall in READ_CALLS:
+            if syscall in OPEN_CALLS or syscall in READ_CALLS or syscall in WRITE_CALLS:
                 self.result.opaque_reasons.add(OPAQUE_TRACE_INCOMPLETE)
         self.result.opened_only = set(self.result.opened_readable)
         if self.result.opened_only:
@@ -328,5 +565,15 @@ class StraceParser:
         self.result.socket_events = sorted(set(self.result.socket_events))
 
 
-def parse_strace(lines: Iterable[str], resolver: MountResolver) -> ParsedStrace:
-    return StraceParser(resolver).feed(lines)
+def parse_strace(
+    lines: Iterable[str],
+    resolver: MountResolver,
+    *,
+    track_temp_semantics: bool = False,
+    event_sink: Callable[[StraceEvent], None] | None = None,
+) -> ParsedStrace:
+    return StraceParser(
+        resolver,
+        track_temp_semantics=track_temp_semantics,
+        event_sink=event_sink,
+    ).feed(lines)

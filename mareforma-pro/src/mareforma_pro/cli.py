@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Iterable
 
 import click
@@ -19,6 +20,12 @@ from .observe import verify_and_verdict
 from .otel import AsyncJsonlSpanExporter
 from .runner import RootlessBwrapRunner, RootlessFuseRunner
 from .server import CollectorServer
+from .supervisor import (
+    DEFAULT_INTERNAL_PORT,
+    DEFAULT_PUBLIC_PORT,
+    MCPProcessSupervisor,
+)
+from .dbproxy import parse_relay_targets
 from .store import ReceiptStore
 
 
@@ -166,6 +173,151 @@ def run(
         click.echo(f"observed_files: {list(result.evidence.observed_files)}")
         click.echo(f"opened_only: {list(result.evidence.opened_only)}")
         click.echo(f"opaque_reasons: {list(verdict.opaque_reasons)}")
+
+
+@cli.command(
+    name="supervise",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.argument("command", nargs=-1, type=click.UNPROCESSED, required=True)
+@click.option("--secret", default=None, help="HMAC secret; prefer MAREFORMA_HMAC_SECRET.")
+@click.option(
+    "--port",
+    default=DEFAULT_PUBLIC_PORT,
+    show_default=True,
+    type=int,
+    help="Public Supervisor port (the client connects here).",
+)
+@click.option("--host", default="127.0.0.1", show_default=True, help="Public bind host.")
+@click.option(
+    "--internal-port",
+    default=DEFAULT_INTERNAL_PORT,
+    show_default=True,
+    type=int,
+    help="First internal MCP port (the unchanged server listens here).",
+)
+@click.option("--workers", default=1, show_default=True, type=int, help="Number of internal processes.")
+@click.option("--egress-proxy", is_flag=True, help="Inject a local HTTP/HTTPS proxy into the server.")
+@click.option(
+    "--db-hook",
+    is_flag=True,
+    help="Prepend the opt-in Python sitecustomize DB/URL hooks to PYTHONPATH.",
+)
+@click.option(
+    "--db-relay",
+    "db_relays",
+    multiple=True,
+    metavar="HOST:PORT",
+    help="Expose a local DB TCP relay and rewrite matching DATABASE_URL/PGHOST-style environment variables.",
+)
+@click.option("--no-strace", is_flag=True, help="Disable the strace FIFO (diagnostic only).")
+@click.option(
+    "--bind-rewrite-port",
+    default=None,
+    type=int,
+    help="Redirect a fixed Python server bind() port to the internal host and port.",
+)
+@click.option("--ready-timeout", default=30.0, show_default=True, type=float)
+@click.option("--drain-timeout", default=2.0, show_default=True, type=float)
+@click.option("--session-idle-timeout", default=300.0, show_default=True, type=float)
+@click.option(
+    "--receipt-log",
+    default="~/.mareforma/mcp-receipts.jsonl",
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=str),
+    help="Append-only Call/Session receipt journal.",
+)
+@click.option("--trace-dir", default=None, type=click.Path(file_okay=False, path_type=str))
+@click.option(
+    "--otel-jsonl",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=str),
+    help="Optional non-authoritative OTel JSONL span output for Call/Session receipts.",
+)
+def supervise(
+    command: tuple[str, ...],
+    secret: str | None,
+    port: int,
+    host: str,
+    internal_port: int,
+    workers: int,
+    egress_proxy: bool,
+    db_hook: bool,
+    db_relays: tuple[str, ...],
+    no_strace: bool,
+    bind_rewrite_port: int | None,
+    ready_timeout: float,
+    drain_timeout: float,
+    session_idle_timeout: float,
+    receipt_log: str,
+    trace_dir: str | None,
+    otel_jsonl: str | None,
+) -> None:
+    """Supervise an unchanged long-running HTTP MCP server.
+
+    The original command is started on an internal loopback port. Requests
+    arrive on the public port and are serialized per internal worker. The
+    supervisor signs one CallReceipt after each request and a SessionReceipt
+    when a session goes idle or the supervisor exits.
+
+    Use ``{internal_port}`` or ``{external_port}`` in the command if its port
+    argument is not the common ``--port <public-port>`` form. For a server that
+    hard-codes its internal port, leave the server command unchanged and pass
+    ``--bind-rewrite-port`` for a Python server, or configure the server to use
+    ``{internal_port}``. The supervisor also sets PORT, MCP_PORT, UVICORN_PORT
+    and MCP_SERVER_PORT for environment-driven servers.
+    """
+    if not command:
+        raise click.UsageError("a command is required after --")
+    try:
+        secret_value = _secret(secret)
+        span_exporter = AsyncJsonlSpanExporter(otel_jsonl) if otel_jsonl else None
+        supervisor = MCPProcessSupervisor(
+            command,
+            secret=secret_value,
+            host=host,
+            port=port,
+            internal_port=internal_port,
+            workers=workers,
+            egress_proxy=egress_proxy,
+            db_hook=db_hook,
+            db_relays=parse_relay_targets(db_relays),
+            use_strace=not no_strace,
+            bind_rewrite_port=bind_rewrite_port,
+            ready_timeout=ready_timeout,
+            drain_timeout=drain_timeout,
+            session_idle_timeout=session_idle_timeout,
+            trace_dir=trace_dir,
+            receipt_log=Path(receipt_log).expanduser(),
+            span_exporter=span_exporter,
+        )
+        supervisor.start()
+    except (MareformaProError, OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"supervisor listening: http://{host}:{port}")
+    click.echo(f"internal endpoints: {[worker.endpoint for worker in supervisor.workers]}")
+    if egress_proxy:
+        click.echo("egress proxy: enabled (HTTPS path remains opaque without MITM CA)")
+    if db_hook:
+        click.echo("db hook: enabled (Python sitecustomize)")
+    if bind_rewrite_port is not None:
+        click.echo(
+            f"bind rewrite: {bind_rewrite_port} -> "
+            f"{supervisor.internal_host}:{supervisor.internal_port}"
+        )
+    if db_relays:
+        click.echo(f"db relays: {list(db_relays)}")
+    click.echo(f"receipt journal: {Path(receipt_log).expanduser()}")
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        supervisor.stop()
+        if otel_jsonl:
+            span_exporter.close()  # type: ignore[possibly-undefined]
+        click.echo("supervisor stopped")
 
 
 @cli.command(name="run-fuse", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})

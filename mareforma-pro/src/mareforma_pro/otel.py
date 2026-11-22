@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .evidence import ScopeEvidence
+from .mcp_receipts import CallReceipt, SessionReceipt
 
 
 def _trace_id(traceparent: str | None, seed: str) -> str:
@@ -47,6 +48,9 @@ def scope_span_from_evidence(
         "mareforma.coverage_roots": list(evidence.coverage_roots),
         "mareforma.observed_files": list(evidence.observed_files),
         "mareforma.observed_urls": list(evidence.observed_urls),
+        "mareforma.observed_egress_urls": list(evidence.observed_egress_urls),
+        "mareforma.internal_temp_files": list(evidence.internal_temp_files),
+        "mareforma.observed_db_queries": [dict(row) for row in evidence.observed_db_queries],
         "mareforma.opened_only": list(evidence.opened_only),
         "mareforma.opaque_reasons": list(evidence.opaque_reasons),
         "mareforma.payload_digests": list(evidence.payload_digests),
@@ -148,6 +152,103 @@ def process_spans_from_evidence(
             }
         )
     return tuple(spans)
+
+
+def call_span_from_receipt(
+    receipt: CallReceipt,
+    *,
+    parent_span_id: str | None = None,
+) -> dict[str, Any]:
+    """Project a long-running MCP CallReceipt into one OTel-shaped span."""
+    trace_id = _trace_id(receipt.traceparent, receipt.call_id)
+    span_id = _span_id(receipt.call_id)
+    attributes: dict[str, Any] = {
+        "mareforma.receipt.kind": "call",
+        "mareforma.call_id": receipt.call_id,
+        "mareforma.scope_id": receipt.scope_id,
+        "mareforma.session_id": receipt.session_id,
+        "mareforma.method": receipt.method,
+        "mareforma.request_id": receipt.request_id,
+        "mareforma.http_status": receipt.http_status,
+        "mareforma.observed_files": list(receipt.observed_files),
+        "mareforma.internal_temp_files": list(receipt.internal_temp_files),
+        "mareforma.observed_urls": list(receipt.observed_urls),
+        "mareforma.observed_egress_urls": list(receipt.observed_egress_urls),
+        "mareforma.observed_db_queries": [dict(row) for row in receipt.observed_db_queries],
+        "mareforma.opened_only": list(receipt.opened_only),
+        "mareforma.unmapped_paths": list(receipt.unmapped_paths),
+        "mareforma.opaque_reasons": list(receipt.opaque_reasons),
+        "mareforma.payload_digests": list(receipt.payload_digests),
+        "mareforma.socket_events": list(receipt.socket_events),
+        "mareforma.collector_mode": receipt.collector_mode,
+        "mareforma.evidence_level": receipt.evidence_level,
+    }
+    if receipt.parent_scope_id:
+        attributes["mareforma.parent_scope_id"] = receipt.parent_scope_id
+    event_attributes: list[dict[str, Any]] = []
+    for path in receipt.observed_files:
+        event_attributes.append({"name": "file.read", "attributes": {"path": path}})
+    for path in receipt.internal_temp_files:
+        event_attributes.append(
+            {"name": "temp.internal_read", "attributes": {"path": path}}
+        )
+    for url in receipt.observed_egress_urls:
+        event_attributes.append({"name": "egress.url", "attributes": {"url": url}})
+    for row in receipt.observed_db_queries:
+        event_attributes.append({"name": "db.query", "attributes": dict(row)})
+    span: dict[str, Any] = {
+        "name": "mareforma.mcp.call",
+        "trace_id": trace_id,
+        "span_id": span_id,
+        "start_time_unix_nano": int(receipt.started_at * 1_000_000_000),
+        "end_time_unix_nano": int(receipt.closed_at * 1_000_000_000),
+        "attributes": attributes,
+    }
+    if parent_span_id:
+        span["parent_span_id"] = parent_span_id
+    if event_attributes:
+        span["events"] = event_attributes
+    if receipt.parent_scope_id:
+        span["links"] = [{"trace_id": trace_id, "span_id": _span_id(receipt.parent_scope_id)}]
+    return span
+
+
+def session_span_from_receipt(
+    receipt: SessionReceipt,
+    *,
+    call_receipts: tuple[CallReceipt, ...] = (),
+) -> dict[str, Any]:
+    """Project a SessionReceipt and link it to its per-call spans."""
+    trace_id = _trace_id(None, receipt.session_id)
+    span_id = _span_id("session:" + receipt.session_id)
+    attributes: dict[str, Any] = {
+        "mareforma.receipt.kind": "session",
+        "mareforma.session_id": receipt.session_id,
+        "mareforma.scope_ids": list(receipt.scope_ids),
+        "mareforma.call_ids": list(receipt.call_ids),
+        "mareforma.call_receipt_digests": list(receipt.call_receipt_digests),
+        "mareforma.observed_files": list(receipt.observed_files),
+        "mareforma.internal_temp_files": list(receipt.internal_temp_files),
+        "mareforma.observed_egress_urls": list(receipt.observed_egress_urls),
+        "mareforma.observed_db_queries": [dict(row) for row in receipt.observed_db_queries],
+        "mareforma.opaque_reasons": list(receipt.opaque_reasons),
+        "mareforma.collector_mode": receipt.collector_mode,
+    }
+    span: dict[str, Any] = {
+        "name": "mareforma.mcp.session",
+        "trace_id": trace_id,
+        "span_id": span_id,
+        "start_time_unix_nano": int(receipt.opened_at * 1_000_000_000),
+        "end_time_unix_nano": int(receipt.closed_at * 1_000_000_000),
+        "attributes": attributes,
+    }
+    links = [
+        {"trace_id": _trace_id(call.traceparent, call.call_id), "span_id": _span_id(call.call_id)}
+        for call in call_receipts
+    ]
+    if links:
+        span["links"] = links
+    return span
 
 
 class AsyncJsonlSpanExporter:

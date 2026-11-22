@@ -1288,22 +1288,34 @@ def test_api_search_section_spells_its_own_parameter_set():
 
 
 def _documented_exceptions(api: str) -> dict[str, str]:
-    """Return ``{exception name: submodule}`` for every exception the page names.
+    """Return ``{exception name: submodule}`` for every core exception.
 
     Two places name one: the table under ``## Exceptions`` and the **Raises**
     block of ``enroll_validator``, which lists validator errors the table
     leaves out. Builtins are skipped; the page documents those as the stdlib
-    names they are.
+    names they are. The page also documents the separately distributed
+    ``mareforma-pro`` receipt exception; that row is excluded here because it
+    is intentionally not re-exported from the core ``mareforma`` namespace.
     """
     section = _section(api, "## Exceptions")
     documented = dict(
-        re.findall(r"^\| `(\w+)` \| `(mareforma[\w.]*)` \|", section, re.MULTILINE)
+        re.findall(r"^\| `(\w+)` \| `(mareforma\.[\w.]+)` \|", section, re.MULTILINE)
     )
     raises = _section(_prose(api), "### `enroll_validator(")
     for name in re.findall(r"^- `(\w+Error)`:", raises, re.MULTILINE):
         if not hasattr(builtins, name):
             documented.setdefault(name, "mareforma.validators")
     return documented
+
+
+def _documented_pro_exceptions(api: str) -> dict[str, str]:
+    """Return ``{exception name: submodule}`` for Pro-owned exceptions."""
+    section = _section(api, "## Exceptions")
+    return dict(re.findall(
+        r"^\| `(\w+Error)` \| `(mareforma_pro\.[\w.]+)` \|",
+        section,
+        re.MULTILINE,
+    ))
 
 
 def test_api_exceptions_resolve_where_the_page_says_they_do():
@@ -1447,7 +1459,10 @@ def test_api_tables_every_exception_it_names():
         for name in re.findall(r"`(\w+Error)`", api)
         if not hasattr(builtins, name)
     }
-    missing = sorted(named - set(_documented_exceptions(api)))
+    documented = set(_documented_exceptions(api)) | set(
+        _documented_pro_exceptions(api)
+    )
+    missing = sorted(named - documented)
     assert not missing, (
         "reference/api.mdx names exceptions no table of its own lists: "
         + ", ".join(missing)

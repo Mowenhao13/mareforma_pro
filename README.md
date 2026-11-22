@@ -315,6 +315,19 @@ cited read crossed this scope's controlled view. Keep the source root narrow
 and use a stronger kernel observer when the threat model requires host-wide
 coverage.
 
+For a long-running HTTP MCP server, `mareforma-pro supervise` (0.4.0+) listens
+on its own public port (default `18100`) and starts the unchanged server on
+the internal loopback port (default `18000`). It streams `strace` through a
+FIFO and signs per-call and per-session receipts. It adds optional
+`--egress-proxy` and `--db-hook` probes without changing the server source.
+Long-lived `GET /mcp` SSE and session `DELETE` requests are forwarded without
+taking the serial call slot, so the official MCP SDK's notification stream
+does not starve later `tools/list` requests. A POST overlapping that stream is
+marked `OPAQUE(concurrent_call_overlap)`. The same limits apply: HTTPS without
+a trusted MITM CA is authority level only, a pre-existing process cannot be
+attached without ptrace permission, and every unobserved channel remains
+`OPAQUE`.
+
 ## Capabilities
 
 | What you get | What it does |

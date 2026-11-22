@@ -43,6 +43,118 @@ parent verifies the HMAC and converts it into a normal Mareforma grounding
 verdict. A citation outside a FUSE receipt's signed `coverage_roots` is
 `OPAQUE(unmapped_sandbox_path)`, never a confident `UNGROUNDED`.
 
+## Long-running MCP supervisor (0.4.0+)
+
+The `supervise` command adds a long-running, no-sudo observation path for an
+HTTP MCP server. The supervisor listens on public port `18100`; the unchanged
+server keeps listening on its fixed internal port `18000`. Requests are
+serialized per internal process so process events can be attributed to one
+call. Point MCP clients at the supervisor port, not directly at `18000`.
+
+```bash
+MAREFORMA_HMAC_SECRET='replace-with-a-private-secret' \
+mareforma-pro supervise \
+  --port 18100 --internal-port 18000 --workers 1 \
+  --egress-proxy --db-hook \
+  -- /path/to/server-venv/bin/python /path/to/mcp_server.py
+```
+
+Use `--workers 1` when the server hard-codes `18000`: only one process can own
+that port. For a server that accepts a port argument, pass
+`--port '{internal_port}'` or change `--internal-port` to a free base port and
+allow additional workers.
+
+The supervisor also injects loopback `HOST` / `MCP_HOST` / `UVICORN_HOST` /
+`MCP_SERVER_HOST` values together with the internal port environment variables.
+If the server reads its bind host from a fixed config file, change that config
+to `127.0.0.1`; otherwise port `18000` may remain directly reachable and bypass
+the receipt boundary.
+
+### Keep the remote endpoint on port 18000
+
+Linux permits the same port on different local addresses. To leave remote MCP
+clients unchanged, bind the original server to loopback and the Supervisor to
+the concrete local address those clients already use:
+
+```bash
+mareforma-pro supervise \
+  --host 10.12.112.230 --port 18000 \
+  --internal-port 18000 \
+  --workers 1 --egress-proxy --db-hook \
+  -- /path/to/server-venv/bin/python /path/to/mcp_server.py
+```
+
+Remote clients continue using `http://10.12.112.230:18000`. The child must be
+loopback-only at `127.0.0.1:18000`; `--host 0.0.0.0` is rejected in this mode
+because a wildcard bind would conflict with the loopback listener. Local
+clients that explicitly connect to `127.0.0.1:18000` still reach the child and
+bypass the Supervisor, so local clients should use the external address too.
+
+### Preserve a wildcard 0.0.0.0 listener
+
+If the Python server hard-codes `0.0.0.0:18000` and that endpoint must remain
+unchanged, let the Supervisor own the wildcard socket and redirect the child's
+fixed `bind()` at runtime:
+
+```bash
+mareforma-pro supervise \
+  --host 0.0.0.0 --port 18000 \
+  --internal-port 18100 \
+  --bind-rewrite-port 18000 \
+  --workers 1 --egress-proxy --db-hook \
+  -- /path/to/server-venv/bin/python /path/to/mcp_server.py
+```
+
+The autohook rewrites only an IPv4 `bind()` whose port is exactly `18000`, to
+`127.0.0.1:18100`. All inbound clients keep using port `18000`, including the
+loopback target of an SSH reverse tunnel. A non-Python server, a server started
+with Python `-S`, or a server whose bind bypasses Python's socket module still
+requires a configurable port or a separate network boundary.
+
+Large MCP servers may spend a minute or more importing their tool catalog. Pass
+`--ready-timeout 240` or higher for those servers; the default 30 seconds is
+the time allowed before the supervisor declares the worker failed.
+
+The supervisor writes HMAC-signed `CallReceipt` records to
+`~/.mareforma/mcp-receipts.jsonl` by default and emits a `SessionReceipt` when
+the MCP session goes idle or the supervisor stops. The optional
+`--otel-jsonl` path exports non-authoritative `mareforma.mcp.call` and
+`mareforma.mcp.session` spans.
+
+Concurrent clients are safe by design: an idle worker is reserved atomically,
+a session stays pinned to its worker, and other clients queue for an available
+worker instead of sharing one. A regression test covers 8 concurrent plain
+clients; each receives `tools/list` with the expected catalog and no client
+needs the `mareforma_pro` package installed.
+
+The official MCP Python SDK opens a long-lived `GET /mcp` SSE stream after
+`notifications/initialized`. `GET` and `DELETE` are forwarded as transport and
+session operations without taking the serialized call slot; otherwise the only
+worker would stay reserved until the client closed that stream and the next
+`tools/list` would return 503. A POST that overlaps a live GET is marked
+`OPAQUE(concurrent_call_overlap)`, because process events are not attributable
+to one request while both are in flight. SSE bytes are forwarded as they
+arrive rather than buffered until a full read.
+
+What the new transport adds:
+
+- a FIFO-fed `strace --seccomp-bpf -f -yy` stream with a quiet drain barrier;
+- `openat`/read evidence and `internal_temp_files` for files written and then
+  read by the same call/session;
+- `connect()` endpoint baselines and an optional local egress proxy;
+- a Python `sitecustomize.py` autohook for SQLite query digests and common
+  HTTP client URLs when `--db-hook` is enabled;
+- explicit `concurrent_call_overlap`, `egress_proxy_bypassed`,
+  `egress_uninspected`, `db_uninspected`, and `https_path_opaque` diagnostics.
+
+This remains a user-space observation boundary. HTTPS proxy mode reports only
+the CONNECT authority and marks `https_path_opaque` unless a trusted local
+MITM CA is later supplied. The Python autohook currently covers SQLite and
+the patched `urllib`/`requests`/`httpx` surfaces; other DB drivers and native
+children require the generic proxy/strace path or a separate adapter. A
+shared long-running server process that is not started under this supervisor
+cannot be ptraced by a no-sudo user after the fact.
+
 ## Grounding scope, not a truth score
 
 `mareforma-pro` reports what the selected backend could observe. It never

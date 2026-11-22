@@ -32,6 +32,11 @@ OPAQUE_OPEN_ONLY = "open_only"
 OPAQUE_SOCKET_UNBOUND = "socket_event_unbound"
 OPAQUE_NO_CITED_SOURCE = "no_cited_source"
 OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE = "computed_no_external_source"
+OPAQUE_CONCURRENT_CALL_OVERLAP = "concurrent_call_overlap"
+OPAQUE_EGRESS_PROXY_BYPASSED = "egress_proxy_bypassed"
+OPAQUE_EGRESS_UNINSPECTED = "egress_uninspected"
+OPAQUE_DB_UNINSPECTED = "db_uninspected"
+OPAQUE_HTTPS_PATH_OPAQUE = "https_path_opaque"
 
 # Whether this observation was expected to read an external source. Most scopes
 # default to ``required``. A pure computation can explicitly say that no external
@@ -52,6 +57,11 @@ OPAQUE_REASONS = frozenset(
         OPAQUE_SOCKET_UNBOUND,
         OPAQUE_NO_CITED_SOURCE,
         OPAQUE_COMPUTED_NO_EXTERNAL_SOURCE,
+        OPAQUE_CONCURRENT_CALL_OVERLAP,
+        OPAQUE_EGRESS_PROXY_BYPASSED,
+        OPAQUE_EGRESS_UNINSPECTED,
+        OPAQUE_DB_UNINSPECTED,
+        OPAQUE_HTTPS_PATH_OPAQUE,
     }
 )
 
@@ -207,6 +217,9 @@ class ScopeEvidence:
     # meaning across the 0.1 -> 0.2 transition.
     observed_urls: tuple[str, ...] = ()
     source_requirement: str = SOURCE_REQUIRED
+    internal_temp_files: tuple[str, ...] = ()
+    observed_egress_urls: tuple[str, ...] = ()
+    observed_db_queries: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -219,9 +232,22 @@ class ScopeEvidence:
             "payload_digests",
             "socket_events",
             "coverage_roots",
+            "internal_temp_files",
+            "observed_egress_urls",
         ):
             object.__setattr__(self, name, tuple(dict.fromkeys(getattr(self, name) or ())))
         object.__setattr__(self, "processes", tuple(self.processes or ()))
+        normalized_db_queries: list[Mapping[str, Any]] = []
+        seen_db_queries: set[str] = set()
+        for item in self.observed_db_queries or ():
+            if not isinstance(item, Mapping):
+                raise ValueError("observed_db_queries entries must be mappings")
+            row = dict(item)
+            key = repr(sorted(row.items(), key=lambda pair: str(pair[0])))
+            if key not in seen_db_queries:
+                seen_db_queries.add(key)
+                normalized_db_queries.append(row)
+        object.__setattr__(self, "observed_db_queries", tuple(normalized_db_queries))
         if self.source_requirement not in SOURCE_REQUIREMENTS:
             raise ValueError(
                 "source_requirement must be one of: "
@@ -260,6 +286,12 @@ class ScopeEvidence:
         # recorded. A non-empty root list is signed as part of the receipt.
         if self.coverage_roots:
             receipt["coverage_roots"] = list(self.coverage_roots)
+        if self.internal_temp_files:
+            receipt["internal_temp_files"] = list(self.internal_temp_files)
+        if self.observed_egress_urls:
+            receipt["observed_egress_urls"] = list(self.observed_egress_urls)
+        if self.observed_db_queries:
+            receipt["observed_db_queries"] = [dict(row) for row in self.observed_db_queries]
         return receipt
 
     @classmethod
@@ -290,6 +322,13 @@ class ScopeEvidence:
             coverage_roots=tuple(receipt.get("coverage_roots") or ()),
             source_requirement=str(
                 receipt.get("source_requirement", SOURCE_REQUIRED)
+            ),
+            internal_temp_files=tuple(receipt.get("internal_temp_files") or ()),
+            observed_egress_urls=tuple(receipt.get("observed_egress_urls") or ()),
+            observed_db_queries=tuple(
+                dict(row)
+                for row in receipt.get("observed_db_queries") or ()
+                if isinstance(row, Mapping)
             ),
             hmac_signature=receipt.get("hmac_signature"),
         )

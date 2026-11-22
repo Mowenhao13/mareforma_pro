@@ -37,6 +37,14 @@ def test_run_requires_a_command():
     assert result.exit_code != 0
 
 
+def test_supervise_help_shows_split_public_and_internal_ports():
+    result = CliRunner().invoke(cli, ["supervise", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "Public Supervisor port" in result.output
+    assert "default: 18100" in result.output
+    assert "default: 18000" in result.output
+
+
 @pytest.mark.skipif(
     not (
         shutil.which("bwrap")

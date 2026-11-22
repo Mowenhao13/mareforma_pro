@@ -860,10 +860,13 @@ from mareforma.signing import (
 )
 from mareforma.validators import InvalidIdentityError, ValidatorAlreadyEnrolledError
 from mareforma.export_bundle import BundleVerificationError
+from mareforma_pro.errors import ReceiptError
 ```
 
-Every exception is also re-exported at the top level so
+Every core `mareforma` exception is also re-exported at the top level so
 catching looks like `from mareforma import RekorInclusionError`.
+The separate `mareforma-pro` distribution does not inject its exceptions into
+the core namespace; import those from `mareforma_pro.errors`.
 
 | Exception | Module | Raised by | Meaning |
 |---|---|---|---|
@@ -907,6 +910,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `ScopeNotClosedError` | `mareforma.observe` | `ObserveHandle.verdict` | The verdict was read inside the open `observe()` block, before the observer had seen the whole span. Subclasses `RuntimeError` |
 | `NoPerturbationsError` | `mareforma.observe` | `perturbation_oracle()` | `perturb` was an empty sequence, so there is no null to run. A caller handing the oracle nothing to measure is a bug in the call, never a `NOT_TESTED` row a report would count. Subclasses `ValueError` |
 | `BundleVerificationError` | `mareforma.export_bundle` | `mareforma verify` | Signed export bundle failed a check: DSSE signature, per-claim subject digest, per-claim asserter signature, validator chain, or a validation envelope a node carries |
+| `ReceiptError` | `mareforma_pro.errors` | `verify_call_receipt()`, `verify_session_receipt()` | A Call or Session receipt is malformed, expired, has an empty identity, or fails its HMAC verification. The record cannot be trusted |
 
 The submodule paths in the table tell you where the source lives. They
 also tell you what a broad catch covers: the `mareforma.db` and
@@ -1791,3 +1795,56 @@ with `ReceiptStore`. `scope_span_from_evidence()` projects one scope span;
 `close_scope`; `AsyncJsonlSpanExporter` is the built-in non-authoritative
 projection. A failed export is swallowed and never changes a receipt or
 grounding verdict.
+
+### Long-running MCP receipts (`MCPProcessSupervisor`)
+
+`mareforma-pro` 0.4.0+ adds a long-running process supervisor for unchanged
+HTTP MCP servers. `MCPProcessSupervisor` binds public port `18100`, starts the
+original command on its fixed internal loopback port `18000` under a streaming
+`strace` FIFO, and serializes requests per worker. It emits a signed
+`mareforma_pro.mcp_call_receipt/v1` for each HTTP call and a signed
+`mareforma_pro.mcp_session_receipt/v1` when a session idles or the supervisor
+stops:
+
+```python
+from mareforma_pro import MCPProcessSupervisor
+
+supervisor = MCPProcessSupervisor(
+    ["/path/to/server-venv/bin/python", "/path/to/mcp_server.py"],
+    secret=secret,
+    port=18100,
+    internal_port=18000,
+)
+supervisor.serve_forever()
+```
+
+Clients connect to the supervisor at `18100`; the child server stays on its
+fixed `18000`. Use one worker when that port is hard-coded, or pass an explicit
+`{internal_port}` argument when the server supports a configurable port.
+
+To preserve an existing remote endpoint, bind both listeners to the same port
+on different addresses: the child on `127.0.0.1:18000` and the supervisor on a
+specific external address such as `10.12.112.230:18000`. Equal ports are
+accepted only when the bind hosts differ; a wildcard supervisor host would
+conflict with the loopback child.
+
+When the child hard-codes `0.0.0.0:18000` and that wildcard endpoint must be
+preserved, pass `bind_rewrite_port=18000` with
+`port=18000`/`internal_port=18100`. The supervisor prepends the Python autohook
+and redirects that exact IPv4 bind to `127.0.0.1:18100`. This is a Python-only
+runtime shim; native servers and Python `-S` processes are outside its scope.
+
+The call receipt carries `observed_files`, `internal_temp_files`,
+`observed_egress_urls`, `observed_db_queries`, `socket_events`, and the
+fail-closed diagnostics `concurrent_call_overlap`, `egress_proxy_bypassed`,
+`egress_uninspected`, `db_uninspected`, and `https_path_opaque`. The session
+receipt carries the call ids, content digests, and aggregate evidence. Verify
+either with `verify_call_receipt()` or `verify_session_receipt()`; an
+unsigned or tampered record raises `ReceiptError`.
+
+`GET /mcp` and `DELETE /mcp` are forwarded as transport/session operations
+without taking the serial worker reservation. This is required for the
+official MCP Streamable HTTP client, which keeps a GET SSE response open for
+server-initiated messages while subsequent POST requests continue. A POST
+that overlaps a live GET is marked `OPAQUE(concurrent_call_overlap)` because
+the shared process event stream cannot attribute those bytes to one request.

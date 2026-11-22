@@ -2,10 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [mareforma-pro 0.4.1] - 2026-11-23
+
+### Fixed
+
+- **MCP Streamable HTTP GET/DELETE compatibility.** The official MCP Python
+  SDK opens `GET /mcp` after `notifications/initialized` and keeps that SSE
+  response open for server-initiated messages. Treating the GET as a normal
+  serialized call reserved the only worker for the lifetime of the stream, so
+  the next `tools/list` timed out and received `503 Service Unavailable`.
+  The supervisor now forwards `GET` and `DELETE` as transport/session
+  operations without taking a call reservation, forwards SSE bytes with
+  `HTTPResponse.read1()` instead of buffering for a full read, and marks any
+  POST that overlaps a live GET as `OPAQUE(concurrent_call_overlap)`. Both
+  standard MCP SDK sessions and plain clients can use the same public port;
+  no `mareforma_pro` installation is required on the client.
+
 ## [Unreleased]
 
 ### Added
 
+- **`mareforma-pro` 0.4.0+ long-running MCP supervisor.** `mareforma-pro
+  supervise` listens on public port `18100` while the unchanged server keeps
+  its fixed internal port `18000`, starts the server under a FIFO-fed `strace`
+  stream, serializes requests per worker, and signs `CallReceipt` /
+  `SessionReceipt` records. It adds
+  `internal_temp_files`, `observed_egress_urls`, and `observed_db_queries` as
+  backwards-compatible optional receipt fields, plus the fail-closed
+  diagnostics `concurrent_call_overlap`, `egress_proxy_bypassed`,
+  `egress_uninspected`, `db_uninspected`, and `https_path_opaque`. Optional
+  egress-proxy and Python `sitecustomize` DB/URL hooks keep the target server
+  source unchanged. A Python `bind()` redirect can keep an existing wildcard
+  `0.0.0.0` endpoint on the supervisor while the fixed-port child moves to an
+  internal loopback port. HTTPS without a trusted local MITM CA remains
+  authority level only.
 - **Independent `mareforma-pro` distribution.** The rootless extension now
   ships from its own `mareforma-pro` project with the `mareforma_pro` import
   package and `mareforma-pro` entry point. It declares core
@@ -53,6 +83,17 @@ All notable changes to this project will be documented in this file.
   process can verify a full external receipt and mint the normal grounding
   verdict. Without one, a raw external receipt is stored as
   `DECLARED`/`OPAQUE(unsigned_declared)`, never as `GROUNDED`.
+
+### Fixed
+
+- **MCP supervisor concurrent-client isolation.** The worker pool now reserves
+  an idle worker and records session affinity under one condition. Previously
+  an affinity request and an anonymous request could both observe the same
+  idle worker, producing `502 {"error": "worker already has an active call"}`
+  under concurrent `initialize` calls. The error path also only finalizes a
+  call after `begin_call()` succeeded. Regression tests cover single-worker
+  affinity, multi-worker reservation, and waiter wake-up; an 8-client staging
+  and production probe both complete with 10 tools per client and no 502.
 
 ## [0.4.0] - 2026-09-10
 

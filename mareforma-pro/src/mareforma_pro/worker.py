@@ -4,7 +4,7 @@ This module is the worker counterpart of :mod:`mareforma_pro.supervisor`. The
 supervisor observes one HTTP MCP gateway; a worker is a separate, long-running
 process that executes tasks sequentially. The worker is started as a child of
 ``strace``, and a tiny ``sitecustomize`` hook reports application events tagged
-with ``BIOMNI_TASK_ID``. The parent process is the only component that holds
+with the configured task-id environment variable. The parent process is the only component that holds
 the HMAC secret and signs receipts.
 """
 
@@ -33,6 +33,7 @@ from .evidence import (
 )
 from .paths import MountResolver
 from .stream import CallEvidence, StraceStream
+from .task_context import TaskContextSpec
 from .strace import SUPERVISOR_TRACE_EXPR, StraceEvent
 from .supervisor import JsonlReceiptJournal
 
@@ -87,8 +88,10 @@ class WorkerProcessObserver:
     ``mareforma-pro worker supervise ... -- <original worker command>``.
 
     Task boundaries are emitted by the worker-side ``sitecustomize`` hook when
-    ``BIOMNI_TASK_ID`` changes. The worker remains source-unmodified when that
-    variable is already managed by its runtime, as in the Biomni worker.
+    the configured task-id environment variable changes. The worker remains
+    source-unmodified when that variable is already managed by its runtime.
+    The default names are generic ``MAREFORMA_*`` variables; use
+    :class:`TaskContextSpec` to map an existing application's variable names.
     """
 
     def __init__(
@@ -109,6 +112,7 @@ class WorkerProcessObserver:
         source_requirement: str = SOURCE_REQUIRED,
         record_query_text: bool = True,
         record_http_query_text: bool = False,
+        task_context: TaskContextSpec | Mapping[str, Any] | None = None,
     ) -> None:
         if not command:
             raise ValueError("command must not be empty")
@@ -145,6 +149,11 @@ class WorkerProcessObserver:
         self.source_requirement = str(source_requirement)
         self.record_query_text = bool(record_query_text)
         self.record_http_query_text = bool(record_http_query_text)
+        self.task_context = (
+            task_context
+            if isinstance(task_context, TaskContextSpec)
+            else TaskContextSpec.from_mapping(task_context)
+        )
 
         self.proc: subprocess.Popen[Any] | None = None
         self.stream: StraceStream | None = None
@@ -187,6 +196,11 @@ class WorkerProcessObserver:
         env["MAREFORMA_AUTOHOOK_SOCKET"] = str(self._event_socket_path)
         env["MAREFORMA_AUTOHOOK_WORKER"] = self.worker_id
         env["MAREFORMA_AUTOHOOK_AUDIT"] = "1"
+        env["MAREFORMA_AUTOHOOK_TASK_CONTEXT"] = json.dumps(
+            self.task_context.to_mapping(),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         env["MAREFORMA_DB_QUERY_TEXT"] = "1" if self.record_query_text else "0"
         env["MAREFORMA_HTTP_QUERY_TEXT"] = "1" if self.record_http_query_text else "0"
         env["PYTHONUNBUFFERED"] = "1"

@@ -60,14 +60,60 @@ else:
     except Exception:
         pass
 
-_TASK_ID_KEY = "BIOMNI_TASK_ID"
+_DEFAULT_TASK_CONTEXT = {
+    "task_id": "MAREFORMA_TASK_ID",
+    "execution_id": "MAREFORMA_EXECUTION_ID",
+    "attempt": "MAREFORMA_ATTEMPT",
+    "attempt_dir": "MAREFORMA_ATTEMPT_DIR",
+    "execution_epoch": "MAREFORMA_EXECUTION_EPOCH",
+    "parent_scope_id": "MAREFORMA_PARENT_SCOPE_ID",
+    "traceparent": "MAREFORMA_TRACEPARENT",
+}
+
+
+def _load_task_context_names() -> dict[str, str]:
+    raw = os.environ.get("MAREFORMA_AUTOHOOK_TASK_CONTEXT", "")
+    supplied: dict[str, Any] = {}
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                supplied = parsed
+        except (TypeError, ValueError):
+            supplied = {}
+    out: dict[str, str] = {}
+    for key, default in _DEFAULT_TASK_CONTEXT.items():
+        value = supplied.get(key, default)
+        if value is None:
+            continue
+        name = str(value).strip()
+        if name:
+            out[key] = name
+    # The parent validates this mapping before launch. Keep a usable fallback
+    # for a direct import of this hook during development.
+    out.setdefault("task_id", _DEFAULT_TASK_CONTEXT["task_id"])
+    return out
+
+
+_TASK_CONTEXT_NAMES = _load_task_context_names()
+_TASK_ID_KEY = _TASK_CONTEXT_NAMES["task_id"]
+_EXECUTION_ID_KEY = _TASK_CONTEXT_NAMES.get("execution_id")
+_ATTEMPT_KEY = _TASK_CONTEXT_NAMES.get("attempt")
+_ATTEMPT_DIR_KEY = _TASK_CONTEXT_NAMES.get("attempt_dir")
+_EXECUTION_EPOCH_KEY = _TASK_CONTEXT_NAMES.get("execution_epoch")
+_PARENT_SCOPE_ID_KEY = _TASK_CONTEXT_NAMES.get("parent_scope_id")
+_TRACEPARENT_KEY = _TASK_CONTEXT_NAMES.get("traceparent")
 _TASK_CONTEXT_KEYS = frozenset(
-    {
-        "BIOMNI_EXECUTION_ID",
-        "BIOMNI_EXECUTION_EPOCH",
-        "BIOMNI_ATTEMPT_DIR",
-        "BIOMNI_ATTEMPT",
-    }
+    name
+    for name in (
+        _EXECUTION_ID_KEY,
+        _EXECUTION_EPOCH_KEY,
+        _ATTEMPT_KEY,
+        _ATTEMPT_DIR_KEY,
+        _PARENT_SCOPE_ID_KEY,
+        _TRACEPARENT_KEY,
+    )
+    if name and name != _TASK_ID_KEY
 )
 
 
@@ -87,12 +133,14 @@ _REWRITE_BIND_TO_HOST = os.environ.get("MAREFORMA_REWRITE_BIND_TO_HOST", "")
 
 
 def _attempt_name() -> str | None:
-    explicit = os.environ.get("BIOMNI_ATTEMPT", "").strip()
-    if explicit:
-        return explicit
-    attempt_dir = os.environ.get("BIOMNI_ATTEMPT_DIR", "").strip()
-    if attempt_dir:
-        return os.path.basename(attempt_dir.rstrip("/")) or None
+    if _ATTEMPT_KEY:
+        explicit = os.environ.get(_ATTEMPT_KEY, "").strip()
+        if explicit:
+            return explicit
+    if _ATTEMPT_DIR_KEY:
+        attempt_dir = os.environ.get(_ATTEMPT_DIR_KEY, "").strip()
+        if attempt_dir:
+            return os.path.basename(attempt_dir.rstrip("/")) or None
     return None
 
 
@@ -101,12 +149,22 @@ def _task_fields() -> dict[str, str]:
     task_id = os.environ.get(_TASK_ID_KEY, "").strip()
     if task_id:
         out["task_id"] = task_id
-    execution_id = os.environ.get("BIOMNI_EXECUTION_ID", "").strip()
-    if execution_id:
-        out["execution_id"] = execution_id
-    epoch = os.environ.get("BIOMNI_EXECUTION_EPOCH", "").strip()
-    if epoch:
-        out["execution_epoch"] = epoch
+    if _EXECUTION_ID_KEY:
+        execution_id = os.environ.get(_EXECUTION_ID_KEY, "").strip()
+        if execution_id:
+            out["execution_id"] = execution_id
+    if _EXECUTION_EPOCH_KEY:
+        epoch = os.environ.get(_EXECUTION_EPOCH_KEY, "").strip()
+        if epoch:
+            out["execution_epoch"] = epoch
+    if _PARENT_SCOPE_ID_KEY:
+        parent_scope_id = os.environ.get(_PARENT_SCOPE_ID_KEY, "").strip()
+        if parent_scope_id:
+            out["parent_scope_id"] = parent_scope_id
+    if _TRACEPARENT_KEY:
+        traceparent = os.environ.get(_TRACEPARENT_KEY, "").strip()
+        if traceparent:
+            out["traceparent"] = traceparent
     attempt = _attempt_name()
     if attempt:
         out["attempt"] = attempt
@@ -176,7 +234,7 @@ def _announce_task_change(
 
 
 def _install_task_context() -> None:
-    """Observe ``BIOMNI_TASK_ID`` transitions without changing worker code.
+    """Observe the configured task-id environment transitions without changing worker code.
 
     Only the root process owns task boundaries. A child Python process inherits
     the same task id and emits ordinary evidence into that scope, but it cannot

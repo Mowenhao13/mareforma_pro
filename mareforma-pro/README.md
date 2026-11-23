@@ -167,7 +167,7 @@ MAREFORMA_HMAC_SECRET='replace-with-a-private-secret' \
 mareforma-pro worker supervise \
   --worker-id 1 \
   --receipt-log ~/.mareforma/worker-1-receipts.jsonl \
-  --coverage-root /srv/biomni/tasks \
+  --coverage-root /srv/tasks \
   -- /path/to/worker-venv/bin/python /path/to/worker.py --worker-id 1
 ```
 
@@ -176,14 +176,27 @@ already-running systemd unit. Replace the unit's `ExecStart` with the command
 above. The child environment never receives `MAREFORMA_HMAC_SECRET`,
 `MAREFORMA_PRO_SECRET`, or `MAREFORMA_SECRET`; only the parent signs receipts.
 
-Task boundaries come from the worker's existing `BIOMNI_TASK_ID` transitions.
+Task boundaries come from transitions of the configured task-id environment
+variable. The defaults are generic: `MAREFORMA_TASK_ID`,
+`MAREFORMA_EXECUTION_ID`, `MAREFORMA_ATTEMPT`, and
+`MAREFORMA_ATTEMPT_DIR`. An unchanged worker that already uses its own names is
+mapped explicitly, for example:
+
+```bash
+mareforma-pro worker supervise \
+  --task-id-env MY_TASK_ID \
+  --execution-id-env MY_EXECUTION_ID \
+  --attempt-dir-env MY_ATTEMPT_DIR \
+  -- /path/to/worker-venv/bin/python /path/to/worker.py
+```
+
+The names are application configuration, not built-in Mareforma semantics.
 `strace -ttt` timestamps are checked against those boundaries, so a FIFO line
 that arrives late is charged to the task active when the syscall completed, not
-to whichever task is active when the parser wakes up. When present,
-`BIOMNI_EXECUTION_ID` and `BIOMNI_ATTEMPT_DIR` are bound into the same scope. A
-child Python process inherits the current task id and its
-application events remain in that task, but it cannot open or close a second
-task scope. No worker source change is required for a Biomni-style runtime.
+to whichever task is active when the parser wakes up. A child Python process
+inherits the current task id and its application events remain in that task,
+but it cannot open or close a second task scope. No worker source change is
+required when the worker already exposes a task-id variable.
 
 Each receipt adds optional `task_id`, `worker_id`, `execution_id`, `attempt`,
 and `read_bytes` fields. It also carries:

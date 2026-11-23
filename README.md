@@ -330,13 +330,18 @@ attached without ptrace permission, and every unobserved channel remains
 
 For a long-running task worker behind such a server,
 `mareforma-pro worker supervise` starts the unchanged process under the same rootless `strace` +
-Python-autohook stack and signs one task-scoped receipt at each
-`BIOMNI_TASK_ID` transition. The receipt binds the task/execution/attempt ids
-and adds `observed_http` rows (method, status, response bytes and SHA-256,
-credential-free URL, query digest), DB commands for SQLite/psycopg/Redis, and
-the file/temp-file read evidence. Task correlation to an MCP request remains
-logical (`task_id` / `request_id` / time), not a cryptographic parent link,
-until the worker receives a parent scope id from the application.
+Python-autohook stack and signs one task-scoped receipt at each configured
+task-id transition. The default task context is application-neutral:
+`MAREFORMA_TASK_ID`, `MAREFORMA_EXECUTION_ID`, `MAREFORMA_ATTEMPT`, and
+`MAREFORMA_ATTEMPT_DIR`. A worker that already uses other variable names is
+wrapped by mapping them with `TaskContextSpec` or the `--task-id-env` CLI
+options; Biomni-style names are not built into Mareforma. The receipt binds
+the task/execution/attempt ids and adds `observed_http` rows (method, status,
+response bytes and SHA-256, credential-free URL, query digest), DB commands
+for SQLite/psycopg/Redis, and the file/temp-file read evidence. Task
+correlation to an MCP request remains logical (`task_id` / `request_id` /
+time), not a cryptographic parent link, until the worker receives a parent
+scope id from the application.
 
 ## Capabilities
 

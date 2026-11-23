@@ -9,8 +9,11 @@ All notable changes to this project will be documented in this file.
 - **Task-scoped worker supervision.** `mareforma-pro worker supervise` and
   `WorkerProcessObserver` start an unchanged long-running worker under
   `strace --seccomp-bpf -f -ttt -yy`, inject the Python autohook, follow
-  `BIOMNI_TASK_ID` transitions, and sign one
-  `mareforma_pro.rootless_receipt/v1` per task. Receipts add optional
+  the configured task-id environment transitions, and sign one
+  `mareforma_pro.rootless_receipt/v1` per task. The default task context is
+  application-neutral (`MAREFORMA_TASK_ID`, `MAREFORMA_EXECUTION_ID`,
+  `MAREFORMA_ATTEMPT`, `MAREFORMA_ATTEMPT_DIR`); callers map existing worker
+  variable names with `TaskContextSpec` or CLI options. Receipts add optional
   `task_id`, `worker_id`, `execution_id`, `attempt`, and `read_bytes` fields.
   The child never receives the HMAC secret.
 - **HTTP response evidence at the application seam.** The autohook now records

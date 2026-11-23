@@ -27,6 +27,7 @@ from .supervisor import (
 )
 from .dbproxy import parse_relay_targets
 from .store import ReceiptStore
+from .task_context import TaskContextSpec
 from .worker import WorkerProcessObserver
 
 
@@ -452,6 +453,48 @@ def worker() -> None:
     is_flag=True,
     help="Record URL query values as well as their digest and key names.",
 )
+@click.option(
+    "--task-id-env",
+    default="MAREFORMA_TASK_ID",
+    show_default=True,
+    help="Environment variable whose transitions delimit tasks.",
+)
+@click.option(
+    "--execution-id-env",
+    default="MAREFORMA_EXECUTION_ID",
+    show_default=True,
+    help="Optional environment variable carrying an execution id.",
+)
+@click.option(
+    "--attempt-env",
+    default="MAREFORMA_ATTEMPT",
+    show_default=True,
+    help="Optional environment variable carrying an attempt label.",
+)
+@click.option(
+    "--attempt-dir-env",
+    default="MAREFORMA_ATTEMPT_DIR",
+    show_default=True,
+    help="Optional environment variable whose basename is the attempt label.",
+)
+@click.option(
+    "--execution-epoch-env",
+    default="MAREFORMA_EXECUTION_EPOCH",
+    show_default=True,
+    help="Optional environment variable carrying an execution epoch.",
+)
+@click.option(
+    "--parent-scope-id-env",
+    default="MAREFORMA_PARENT_SCOPE_ID",
+    show_default=True,
+    help="Optional environment variable carrying a parent scope id.",
+)
+@click.option(
+    "--traceparent-env",
+    default="MAREFORMA_TRACEPARENT",
+    show_default=True,
+    help="Optional environment variable carrying a W3C traceparent.",
+)
 def worker_supervise(
     command: tuple[str, ...],
     secret: str | None,
@@ -468,18 +511,36 @@ def worker_supervise(
     no_strace: bool,
     db_query_text: bool,
     http_query_text: bool,
+    task_id_env: str,
+    execution_id_env: str,
+    attempt_env: str,
+    attempt_dir_env: str,
+    execution_epoch_env: str,
+    parent_scope_id_env: str,
+    traceparent_env: str,
 ) -> None:
     """Run an unchanged worker under a per-task observation scope.
 
-    Task boundaries come from ``BIOMNI_TASK_ID`` transitions in the worker's
-    Python runtime. Each task receives its own HMAC-signed receipt. The child
-    never receives the HMAC secret. The observer must start the worker itself;
-    it cannot attach to an already-running systemd unit.
+    Task boundaries come from transitions of the configured task-id
+    environment variable in the worker's Python runtime. The names are
+    application-neutral; pass aliases when an unchanged worker already uses
+    its own task variables. Each task receives its own HMAC-signed receipt.
+    The child never receives the HMAC secret. The observer must start the
+    worker itself; it cannot attach to an already-running systemd unit.
     """
     if not command:
         raise click.UsageError("a command is required after --")
     try:
         secret_value = _secret(secret)
+        task_context = TaskContextSpec(
+            task_id_env=task_id_env,
+            execution_id_env=execution_id_env,
+            attempt_env=attempt_env,
+            attempt_dir_env=attempt_dir_env,
+            execution_epoch_env=execution_epoch_env,
+            parent_scope_id_env=parent_scope_id_env,
+            traceparent_env=traceparent_env,
+        )
         observer = WorkerProcessObserver(
             command,
             secret=secret_value,
@@ -496,8 +557,10 @@ def worker_supervise(
             source_requirement=source_requirement,
             record_query_text=db_query_text,
             record_http_query_text=http_query_text,
+            task_context=task_context,
         )
         click.echo(f"worker observer: worker_id={worker_id}")
+        click.echo(f"task id environment: {task_id_env}")
         click.echo(f"worker command: {list(command)}")
         click.echo(f"receipt journal: {Path(receipt_log).expanduser()}")
         if no_strace:

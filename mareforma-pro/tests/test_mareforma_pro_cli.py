@@ -82,3 +82,5 @@ def test_worker_supervise_help_documents_task_scoped_receipts():
     assert "per-task observation scope" in result.output
     assert "worker-receipts.jsonl" in result.output
     assert "--no-strace" in result.output
+    assert "--task-id-env" in result.output
+    assert "MAREFORMA_TASK_ID" in result.output

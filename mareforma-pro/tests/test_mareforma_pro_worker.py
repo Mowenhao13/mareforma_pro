@@ -91,7 +91,12 @@ def _event_receiver(tmp_path: Path):
         sock.close()
 
 
-def _autohook_env(event_socket: Path, *, extra_path: Path | None = None) -> dict[str, str]:
+def _autohook_env(
+    event_socket: Path,
+    *,
+    extra_path: Path | None = None,
+    task_context: dict[str, str] | None = None,
+) -> dict[str, str]:
     autohook = Path(__file__).parents[1] / "src" / "mareforma_pro" / "autohook"
     paths = [str(autohook)]
     if extra_path is not None:
@@ -103,6 +108,20 @@ def _autohook_env(event_socket: Path, *, extra_path: Path | None = None) -> dict
     env["MAREFORMA_AUTOHOOK_WORKER"] = "test-worker"
     env["MAREFORMA_AUTOHOOK_AUDIT"] = "1"
     env.pop("MAREFORMA_AUTOHOOK_OWNER_PID", None)
+    for name in (
+        "MAREFORMA_TASK_ID",
+        "MAREFORMA_EXECUTION_ID",
+        "MAREFORMA_ATTEMPT",
+        "MAREFORMA_ATTEMPT_DIR",
+        "MAREFORMA_EXECUTION_EPOCH",
+        "MAREFORMA_PARENT_SCOPE_ID",
+        "MAREFORMA_TRACEPARENT",
+    ):
+        env.pop(name, None)
+    if task_context is None:
+        env.pop("MAREFORMA_AUTOHOOK_TASK_CONTEXT", None)
+    else:
+        env["MAREFORMA_AUTOHOOK_TASK_CONTEXT"] = json.dumps(task_context)
     return env
 
 
@@ -122,14 +141,14 @@ def test_autohook_task_boundaries_ignore_child_processes(tmp_path):
         env = _autohook_env(event_socket)
         script = """
 import os, subprocess, sys
-os.environ["BIOMNI_TASK_ID"] = "task-main"
-os.environ["BIOMNI_EXECUTION_ID"] = "exec-main"
-os.environ["BIOMNI_ATTEMPT_DIR"] = "/tmp/attempt-2"
+os.environ["MAREFORMA_TASK_ID"] = "task-main"
+os.environ["MAREFORMA_EXECUTION_ID"] = "exec-main"
+os.environ["MAREFORMA_ATTEMPT_DIR"] = "/tmp/attempt-2"
 subprocess.run(
-    [sys.executable, "-c", "import os; assert os.environ['BIOMNI_TASK_ID'] == 'task-main'"],
+    [sys.executable, "-c", "import os; assert os.environ['MAREFORMA_TASK_ID'] == 'task-main'"],
     check=True,
 )
-os.environ.pop("BIOMNI_TASK_ID")
+os.environ.pop("MAREFORMA_TASK_ID")
 """
         completed = _run_python(script, env)
         assert completed.returncode == 0, completed.stderr
@@ -144,6 +163,62 @@ os.environ.pop("BIOMNI_TASK_ID")
     assert context
     assert context[-1]["execution_id"] == "exec-main"
     assert context[-1]["attempt"] == "attempt-2"
+
+
+def test_autohook_does_not_infer_an_unmapped_application_task_variable(tmp_path):
+    with _event_receiver(tmp_path) as (event_socket, events):
+        env = _autohook_env(event_socket)
+        script = """
+import os
+os.environ["APPLICATION_TASK_ID"] = "application-task"
+os.environ["APPLICATION_TASK_ID"] = "application-task-2"
+os.environ.pop("APPLICATION_TASK_ID")
+"""
+        completed = _run_python(script, env)
+        assert completed.returncode == 0, completed.stderr
+
+    assert not [
+        event for event in events if event.get("kind") in {"task_start", "task_end"}
+    ]
+
+
+def test_autohook_uses_an_explicit_application_task_variable_mapping(tmp_path):
+    with _event_receiver(tmp_path) as (event_socket, events):
+        env = _autohook_env(
+            event_socket,
+            task_context={
+                "task_id": "APPLICATION_TASK_ID",
+                "execution_id": "APPLICATION_EXECUTION_ID",
+                "attempt": "APPLICATION_ATTEMPT",
+                "attempt_dir": "APPLICATION_ATTEMPT_DIR",
+                "execution_epoch": "APPLICATION_EXECUTION_EPOCH",
+                "parent_scope_id": "APPLICATION_PARENT_SCOPE_ID",
+                "traceparent": "APPLICATION_TRACEPARENT",
+            },
+        )
+        script = """
+import os
+os.environ["APPLICATION_TASK_ID"] = "mapped-task"
+os.environ["APPLICATION_EXECUTION_ID"] = "mapped-exec"
+os.environ["APPLICATION_ATTEMPT"] = "mapped-attempt"
+os.environ["APPLICATION_PARENT_SCOPE_ID"] = "parent-scope"
+os.environ["APPLICATION_TRACEPARENT"] = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+os.environ.pop("APPLICATION_TASK_ID")
+"""
+        completed = _run_python(script, env)
+        assert completed.returncode == 0, completed.stderr
+
+    boundaries = [
+        event for event in events if event.get("kind") in {"task_start", "task_end"}
+    ]
+    assert [event["kind"] for event in boundaries] == ["task_start", "task_end"]
+    assert boundaries[0]["task_id"] == "mapped-task"
+    contexts = [event for event in events if event.get("kind") == "task_context"]
+    assert contexts
+    assert contexts[-1]["execution_id"] == "mapped-exec"
+    assert contexts[-1]["attempt"] == "mapped-attempt"
+    assert contexts[-1]["parent_scope_id"] == "parent-scope"
+    assert contexts[-1]["traceparent"].startswith("00-")
 
 
 def test_autohook_requests_stream_records_body_digest_with_a_private_query(tmp_path):
@@ -174,12 +249,12 @@ class Session:
         env = _autohook_env(event_socket, extra_path=fake)
         script = """
 import os
-os.environ["BIOMNI_TASK_ID"] = "task-requests"
+os.environ["MAREFORMA_TASK_ID"] = "task-requests"
 import requests
 response = requests.Session().request("GET", "https://example.org/data?token=secret")
 assert b"".join(response.iter_content()) == b"hello-world"
 response.close()
-os.environ.pop("BIOMNI_TASK_ID")
+os.environ.pop("MAREFORMA_TASK_ID")
 """
         completed = _run_python(script, env)
         assert completed.returncode == 0, completed.stderr
@@ -265,12 +340,12 @@ class Pipeline(Redis):
         env["MAREFORMA_DB_QUERY_TEXT"] = "1"
         script = """
 import os
-os.environ["BIOMNI_TASK_ID"] = "task-db"
+os.environ["MAREFORMA_TASK_ID"] = "task-db"
 import psycopg
 psycopg.Cursor().execute("select * from proteins where id = %s", (1,))
 from redis import Redis
 Redis().execute_command("GET", "protein:P04637")
-os.environ.pop("BIOMNI_TASK_ID")
+os.environ.pop("MAREFORMA_TASK_ID")
 """
         completed = _run_python(script, env)
         assert completed.returncode == 0, completed.stderr
@@ -308,9 +383,9 @@ probe = {{
 }}
 Path({str(secret_probe)!r}).write_text(json.dumps(probe), encoding="utf-8")
 
-os.environ["BIOMNI_TASK_ID"] = "task-a"
-os.environ["BIOMNI_EXECUTION_ID"] = "exec-a"
-os.environ["BIOMNI_ATTEMPT_DIR"] = "/tmp/attempt-1"
+os.environ["MAREFORMA_TASK_ID"] = "task-a"
+os.environ["MAREFORMA_EXECUTION_ID"] = "exec-a"
+os.environ["MAREFORMA_ATTEMPT_DIR"] = "/tmp/attempt-1"
 Path({str(data_a)!r}).read_text(encoding="utf-8")
 db = sqlite3.connect({str(tmp_path / "science.db")!r})
 db.execute("create table if not exists protein (id text)").fetchall()
@@ -318,17 +393,17 @@ db.execute("insert into protein values (?)", ("P04637",)).fetchall()
 db.close()
 response = httpx.get({base_url!r} + "/protein/P04637?format=json")
 assert response.status_code == 200
-os.environ.pop("BIOMNI_TASK_ID")
+os.environ.pop("MAREFORMA_TASK_ID")
 time.sleep(0.15)
 
-os.environ["BIOMNI_TASK_ID"] = "task-b"
-os.environ["BIOMNI_EXECUTION_ID"] = "exec-b"
-os.environ["BIOMNI_ATTEMPT_DIR"] = "/tmp/attempt-2"
+os.environ["MAREFORMA_TASK_ID"] = "task-b"
+os.environ["MAREFORMA_EXECUTION_ID"] = "exec-b"
+os.environ["MAREFORMA_ATTEMPT_DIR"] = "/tmp/attempt-2"
 Path({str(data_b)!r}).read_text(encoding="utf-8")
 with httpx.Client() as client:
     with client.stream("GET", {base_url!r} + "/stream?format=json") as response:
         assert len(b"".join(response.iter_bytes())) == 1000
-os.environ.pop("BIOMNI_TASK_ID")
+os.environ.pop("MAREFORMA_TASK_ID")
 """,
             encoding="utf-8",
         )
@@ -391,8 +466,8 @@ def test_worker_observer_marks_no_strace_as_trace_incomplete(tmp_path):
     worker_script.write_text(
         """
 import os
-os.environ["BIOMNI_TASK_ID"] = "compute-only"
-os.environ.pop("BIOMNI_TASK_ID")
+os.environ["MAREFORMA_TASK_ID"] = "compute-only"
+os.environ.pop("MAREFORMA_TASK_ID")
 """,
         encoding="utf-8",
     )

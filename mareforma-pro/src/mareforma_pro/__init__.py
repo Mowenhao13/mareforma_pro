@@ -76,6 +76,7 @@ from .mcp_receipts import (
     verify_session_receipt,
 )
 from .supervisor import MCPProcessSupervisor, WorkerConfig, rewrite_command_port
+from .task_context import TaskContextSpec
 from .worker import WorkerProcessObserver
 from .store import ReceiptStore
 from .strace import (
@@ -144,6 +145,7 @@ __all__ = [
     "StraceParser",
     "TRACE_EXPR",
     "SUPERVISOR_TRACE_EXPR",
+    "TaskContextSpec",
     "WorkerConfig",
     "WorkerProcessObserver",
     "VerifiedScopeEvidence",

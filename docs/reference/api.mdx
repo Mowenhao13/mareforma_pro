@@ -1853,31 +1853,40 @@ the shared process event stream cannot attribute those bytes to one request.
 
 `mareforma-pro` 0.5.0+ adds `WorkerProcessObserver` for an unchanged
 long-running task worker. It starts the worker as a child of `strace`, injects
-the Python autohook, observes `BIOMNI_TASK_ID` transitions, and signs one
-`mareforma_pro.rootless_receipt/v1` at each task boundary:
+the Python autohook, observes the configured task-id environment transition,
+and signs one `mareforma_pro.rootless_receipt/v1` at each task boundary:
 
 ```python
-from mareforma_pro import WorkerProcessObserver
+from mareforma_pro import TaskContextSpec, WorkerProcessObserver
 
+context = TaskContextSpec(
+    task_id_env="MY_TASK_ID",
+    execution_id_env="MY_EXECUTION_ID",
+    attempt_dir_env="MY_ATTEMPT_DIR",
+)
 observer = WorkerProcessObserver(
     ["/path/to/worker-venv/bin/python", "/path/to/worker.py"],
     secret=secret,
     worker_id="1",
     receipt_log="~/.mareforma/worker-1-receipts.jsonl",
-    coverage_roots=["/srv/biomni/tasks"],
+    coverage_roots=["/srv/tasks"],
+    task_context=context,
 )
 returncode = observer.run_forever()
 ```
 
-The child never receives the HMAC secret. `BIOMNI_EXECUTION_ID` and the
-basename of `BIOMNI_ATTEMPT_DIR` are bound as `execution_id` and `attempt`.
-Only the root Python process can open or close a task; a child Python process
-inherits the task id and its HTTP/DB events remain in that scope without
-minting a second one. `strace -ttt` completion timestamps are matched against
-the task window, so a late FIFO line cannot be charged to the next task. Each
-task produces a receipt even when it read no
-external source, so an execution with zero evidence is visible instead of
-silently missing.
+The default context names are generic: `MAREFORMA_TASK_ID`,
+`MAREFORMA_EXECUTION_ID`, `MAREFORMA_ATTEMPT`, and
+`MAREFORMA_ATTEMPT_DIR`. The names are application configuration; Mareforma
+does not infer an application's variable names. The child never receives the
+HMAC secret. The configured execution-id variable and the basename of the
+configured attempt-directory variable are bound as `execution_id` and
+`attempt`. Only the root Python process can open or close a task; a child
+Python process inherits the task id and its HTTP/DB events remain in that scope
+without minting a second one. `strace -ttt` completion timestamps are matched
+against the task window, so a late FIFO line cannot be charged to the next
+task. Each task produces a receipt even when it read no external source, so an
+execution with zero evidence is visible instead of silently missing.
 
 The receipt adds optional `task_id`, `worker_id`, `execution_id`, `attempt`,
 and `read_bytes` fields. `observed_http` is a list of request rows:

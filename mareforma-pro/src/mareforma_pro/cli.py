@@ -27,6 +27,7 @@ from .supervisor import (
 )
 from .dbproxy import parse_relay_targets
 from .store import ReceiptStore
+from .worker import WorkerProcessObserver
 
 
 def _secret(value: str | None) -> str:
@@ -400,6 +401,115 @@ def run_fuse(
         click.echo(f"observed_files: {list(result.evidence.observed_files)}")
         click.echo(f"opened_only: {list(result.evidence.opened_only)}")
         click.echo(f"opaque_reasons: {list(verdict.opaque_reasons)}")
+
+
+@cli.group()
+def worker() -> None:
+    """Observe one long-running worker process without modifying it."""
+
+
+@worker.command(
+    name="supervise",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.argument("command", nargs=-1, type=click.UNPROCESSED, required=True)
+@click.option("--secret", default=None, help="HMAC secret; prefer MAREFORMA_HMAC_SECRET.")
+@click.option("--worker-id", default="0", show_default=True)
+@click.option("--collector-id", default=None)
+@click.option(
+    "--receipt-log",
+    default="~/.mareforma/worker-receipts.jsonl",
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=str),
+    help="Append-only per-task receipt journal.",
+)
+@click.option("--trace-dir", default=None, type=click.Path(file_okay=False, path_type=str))
+@click.option("--event-socket", default=None, type=click.Path(dir_okay=False, path_type=str))
+@click.option(
+    "--coverage-root",
+    "coverage_roots",
+    multiple=True,
+    help="Host path the worker is expected to read; repeat for each root.",
+)
+@click.option(
+    "--source-requirement",
+    type=click.Choice(sorted(SOURCE_REQUIREMENTS)),
+    default="required",
+    show_default=True,
+)
+@click.option("--drain-timeout", default=2.0, show_default=True, type=float)
+@click.option("--receipt-ttl", default=300.0, show_default=True, type=float)
+@click.option("--strace-binary", default=None, help="Override the system strace path.")
+@click.option("--no-strace", is_flag=True, help="Disable the kernel trace (diagnostic only).")
+@click.option(
+    "--db-query-text/--no-db-query-text",
+    default=True,
+    show_default=True,
+    help="Record up to 4096 characters of SQL/Redis command text.",
+)
+@click.option(
+    "--http-query-text",
+    is_flag=True,
+    help="Record URL query values as well as their digest and key names.",
+)
+def worker_supervise(
+    command: tuple[str, ...],
+    secret: str | None,
+    worker_id: str,
+    collector_id: str | None,
+    receipt_log: str,
+    trace_dir: str | None,
+    event_socket: str | None,
+    coverage_roots: tuple[str, ...],
+    source_requirement: str,
+    drain_timeout: float,
+    receipt_ttl: float,
+    strace_binary: str | None,
+    no_strace: bool,
+    db_query_text: bool,
+    http_query_text: bool,
+) -> None:
+    """Run an unchanged worker under a per-task observation scope.
+
+    Task boundaries come from ``BIOMNI_TASK_ID`` transitions in the worker's
+    Python runtime. Each task receives its own HMAC-signed receipt. The child
+    never receives the HMAC secret. The observer must start the worker itself;
+    it cannot attach to an already-running systemd unit.
+    """
+    if not command:
+        raise click.UsageError("a command is required after --")
+    try:
+        secret_value = _secret(secret)
+        observer = WorkerProcessObserver(
+            command,
+            secret=secret_value,
+            worker_id=worker_id,
+            collector_id=collector_id,
+            use_strace=not no_strace,
+            strace_binary=strace_binary,
+            drain_timeout=drain_timeout,
+            receipt_ttl=receipt_ttl,
+            receipt_log=Path(receipt_log).expanduser(),
+            trace_dir=trace_dir,
+            event_socket=event_socket,
+            coverage_roots=coverage_roots,
+            source_requirement=source_requirement,
+            record_query_text=db_query_text,
+            record_http_query_text=http_query_text,
+        )
+        click.echo(f"worker observer: worker_id={worker_id}")
+        click.echo(f"worker command: {list(command)}")
+        click.echo(f"receipt journal: {Path(receipt_log).expanduser()}")
+        if no_strace:
+            click.echo("kernel trace: disabled (every receipt is trace_incomplete)")
+        else:
+            click.echo("kernel trace: strace --seccomp-bpf -f -yy")
+        returncode = observer.run_forever()
+    except (MareformaProError, OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"worker stopped: returncode={returncode}")
+    if returncode:
+        raise click.exceptions.Exit(returncode)
 
 
 @cli.command()

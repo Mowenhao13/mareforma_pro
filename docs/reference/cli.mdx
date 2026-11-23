@@ -952,6 +952,43 @@ adds a trusted local MITM CA. Direct external connections are reconciled
 against `strace connect()` and become `egress_proxy_bypassed` or
 `egress_uninspected` when the proxy is bypassed or disabled.
 
+### mareforma-pro worker supervise
+
+```bash
+mareforma-pro worker supervise \
+  --worker-id 1 \
+  --receipt-log ~/.mareforma/worker-1-receipts.jsonl \
+  --coverage-root /srv/biomni/tasks \
+  -- /path/to/worker-venv/bin/python /path/to/worker.py --worker-id 1
+```
+
+`worker supervise` is the 0.5.0+ path for a long-running task worker. It starts
+an unchanged worker under `strace --seccomp-bpf -f -ttt -yy`, prepends the Python
+autohook to `PYTHONPATH`, and signs one task-scoped
+`mareforma_pro.rootless_receipt/v1` receipt when `BIOMNI_TASK_ID` transitions.
+`BIOMNI_EXECUTION_ID` and the basename of `BIOMNI_ATTEMPT_DIR` become the
+receipt's `execution_id` and `attempt`. `-ttt` timestamps are checked against
+the task boundaries, so a late FIFO line is charged to the task active when the
+syscall completed rather than the next task. The observer must launch the
+worker; it cannot attach to a running process without `sudo`.
+
+The receipt adds `task_id`, `worker_id`, `execution_id`, `attempt`, and
+`read_bytes`. Its `observed_http` rows carry the credential-free URL, method,
+status, response-body length, response SHA-256, and a query digest plus key
+names for `urllib`, `requests`, and `httpx`. `observed_db_queries` covers
+`sqlite3`, `psycopg`, `psycopg2`, and `redis`; SQL text is recorded by default
+and can be disabled with `--no-db-query-text`. Query values in URLs are omitted
+unless `--http-query-text` is explicitly set, because presigned URLs often
+contain secrets. An unconsumed stream or an unobservable body adds
+`OPAQUE(http_body_unobserved)`.
+
+`--no-strace` is diagnostic only and always adds
+`OPAQUE(trace_incomplete)`. The worker receipt is not yet cryptographically
+bound to a parent MCP request scope: `task_id` / `request_id` / `execution_id`
+correlation is not a signed parent-child link. Native reads that bypass both
+the Python hook and the strace filter (`mmap`, `io_uring`, direct syscalls) and
+direct use of unpatched HTTP transports remain outside the claim.
+
 ### mareforma-pro demo
 
 ```bash

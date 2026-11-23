@@ -1,6 +1,6 @@
 """Rootless, no-sudo observation extension for Mareforma."""
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 from .backend import CollectorBackend, EvidenceBackend, InProcessBackend
 from .collector import RootlessCollector
@@ -19,6 +19,7 @@ from .evidence import (
     OPAQUE_EGRESS_PROXY_BYPASSED,
     OPAQUE_EGRESS_UNINSPECTED,
     OPAQUE_HTTPS_PATH_OPAQUE,
+    OPAQUE_HTTP_BODY_UNOBSERVED,
     SOURCE_NOT_APPLICABLE,
     SOURCE_REQUIRED,
     ScopeEvidence,
@@ -75,6 +76,7 @@ from .mcp_receipts import (
     verify_session_receipt,
 )
 from .supervisor import MCPProcessSupervisor, WorkerConfig, rewrite_command_port
+from .worker import WorkerProcessObserver
 from .store import ReceiptStore
 from .strace import (
     SUPERVISOR_TRACE_EXPR,
@@ -117,6 +119,7 @@ __all__ = [
     "OPAQUE_EGRESS_PROXY_BYPASSED",
     "OPAQUE_EGRESS_UNINSPECTED",
     "OPAQUE_HTTPS_PATH_OPAQUE",
+    "OPAQUE_HTTP_BODY_UNOBSERVED",
     "OTLPSpanExporterAdapter",
     "ParsedStrace",
     "ReceiptError",
@@ -142,6 +145,7 @@ __all__ = [
     "TRACE_EXPR",
     "SUPERVISOR_TRACE_EXPR",
     "WorkerConfig",
+    "WorkerProcessObserver",
     "VerifiedScopeEvidence",
     "assert_claim_from_receipt",
     "audit_scope",

@@ -814,7 +814,7 @@ class _SupervisorHTTPServer(ThreadingHTTPServer):
 
 class _MCPHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "mareforma-pro-supervisor/0.4.1"
+    server_version = "mareforma-pro-supervisor/0.5.0"
     sys_version = ""
 
     def log_message(self, format: str, *args: Any) -> None:

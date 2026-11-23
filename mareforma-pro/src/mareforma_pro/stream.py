@@ -20,6 +20,7 @@ from .evidence import (
     OPAQUE_EGRESS_PROXY_BYPASSED,
     OPAQUE_EGRESS_UNINSPECTED,
     OPAQUE_HTTPS_PATH_OPAQUE,
+    OPAQUE_HTTP_BODY_UNOBSERVED,
     OPAQUE_TRACE_INCOMPLETE,
     OPAQUE_UNMAPPED_TMPFS,
     normalize_path,
@@ -58,7 +59,11 @@ class CallEvidence:
     connect_endpoints: set[str] = field(default_factory=set)
     processes: list[dict[str, Any]] = field(default_factory=list)
     written_files: set[str] = field(default_factory=set)
+    read_bytes: int = 0
     _db_rows: set[str] = field(default_factory=set, init=False, repr=False)
+    _http_pending: dict[str, tuple[str, str | None]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def add_application_event(self, event: Mapping[str, Any]) -> None:
         """Merge an optional Python-autohook event."""
@@ -80,11 +85,36 @@ class CallEvidence:
             return
         if kind in {"http", "http_url"}:
             url = event.get("url")
-            if url:
-                self.observed_egress_urls.add(normalize_path(str(url)))
+            if not url:
+                return
+            identity = normalize_path(str(url))
+            self.observed_egress_urls.add(identity)
+            final_url = event.get("final_url")
+            final_identity = normalize_path(str(final_url)) if final_url else None
+            if final_identity:
+                self.observed_egress_urls.add(final_identity)
             path_opaque = bool(event.get("path_opaque"))
             if path_opaque:
                 self.opaque_reasons.add(OPAQUE_HTTPS_PATH_OPAQUE)
+            key = str(
+                event.get("request_id")
+                or f"{identity}|{event.get('method') or ''}|{event.get('status') or ''}"
+            )
+            if event.get("body_observed") and not event.get("pending"):
+                self.observed_urls.add(identity)
+                if final_identity:
+                    self.observed_urls.add(final_identity)
+                digest = event.get("body_digest")
+                if digest:
+                    self.payload_digests.add(str(digest))
+                self._http_pending.pop(key, None)
+            elif event.get("pending"):
+                # A streamed body may complete before the call closes. Keep
+                # the URL visible but defer the opaque decision.
+                self._http_pending[key] = (identity, final_identity)
+            else:
+                self._http_pending.pop(key, None)
+                self.opaque_reasons.add(OPAQUE_HTTP_BODY_UNOBSERVED)
             return
         if kind == "opaque":
             reason = event.get("reason")
@@ -130,6 +160,7 @@ class CallEvidence:
             return
         if _is_system_path(path):
             return
+        self.read_bytes += int(event.bytes)
         db_path = path if _is_db_path(path) else None
         if db_path is not None:
             self.observed_files.add(path)
@@ -160,13 +191,14 @@ class CallEvidence:
         egress_proxy_enabled: bool = False,
         egress_proxy_endpoints: Iterable[str] = (),
         db_hook_enabled: bool = False,
+        skip_network_reconciliation: bool = False,
     ) -> dict[str, Any]:
         """Return keyword arguments for :func:`build_call_receipt`."""
         self.opened_only = set(self.opened_readable)
         self.opened_only.difference_update(self.observed_files)
         self.opened_only.difference_update(self.internal_temp_files)
         proxy_endpoints = set(egress_proxy_endpoints)
-        for endpoint in self.connect_endpoints:
+        for endpoint in (() if skip_network_reconciliation else self.connect_endpoints):
             if not endpoint.startswith("tcp:"):
                 continue
             try:
@@ -194,6 +226,9 @@ class CallEvidence:
             # The caller decides whether an open-only path is relevant to the
             # cited finding. Keep the same diagnostic vocabulary as 0.2.0.
             self.opaque_reasons.add("open_only")
+        if self._http_pending:
+            self.opaque_reasons.add(OPAQUE_HTTP_BODY_UNOBSERVED)
+            self._http_pending.clear()
         return {
             "observed_files": tuple(sorted(self.observed_files)),
             "internal_temp_files": tuple(sorted(self.internal_temp_files)),

@@ -7,7 +7,7 @@ resolved path lands in ``opened_only`` and the verdict layer can fail closed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import posixpath
 import re
@@ -77,7 +77,7 @@ SOCKET_CALLS = frozenset(
 WRITE_CALLS = frozenset({"write", "pwrite64", "writev", "pwritev", "pwritev2"})
 MMAP_CALLS = frozenset({"mmap"})
 
-_LINE = re.compile(r"^(?:\[pid\s+(\d+)\]|(\d+))\s+(.*)$")
+_LINE = re.compile(r"^(?:\[pid\s+(\d+)\]|(\d+))\s+(?:(\d+(?:\.\d+)?)\s+)?(.*)$")
 _UNFINISHED = re.compile(r"^([A-Za-z0-9_]+)\((.*)<unfinished \.\.\.>$")
 _RESUMED = re.compile(r"^<\.\.\.\s+([A-Za-z0-9_]+)\s+resumed>(.*)$")
 _CALL = re.compile(r"^([A-Za-z0-9_]+)\((.*)\)\s*=\s*(-?\d+.*)$")
@@ -170,6 +170,11 @@ class StraceEvent:
     endpoint: str | None = None
     success: bool = True
     is_dir: bool = False
+    # Wall-clock completion time when the trace used ``strace -ttt``. The
+    # worker observer uses it to attribute a late FIFO line to the task that
+    # was active when the syscall completed, not to the task being processed
+    # when the line happened to arrive.
+    timestamp: float | None = None
 
 
 def _first_quoted(args: str) -> str | None:
@@ -243,11 +248,14 @@ class StraceParser:
         self.event_sink = event_sink
         self.result = ParsedStrace()
         # pending unfinished call prefix keyed by pid
-        self._pending: dict[str, tuple[str, str]] = {}
+        self._pending: dict[str, tuple[str, str, float | None]] = {}
         # fd -> open metadata keyed by (pid, fd)
         self._fd: dict[tuple[int, int], _OpenRecord] = {}
+        self._current_timestamp: float | None = None
 
     def _emit(self, event: StraceEvent) -> None:
+        if event.timestamp is None and self._current_timestamp is not None:
+            event = replace(event, timestamp=self._current_timestamp)
         self.result.events.append(event)
         if self.event_sink is None:
             return
@@ -275,11 +283,22 @@ class StraceParser:
         assert pid_text is not None
         pid = int(pid_text)
         self.result.pids.add(pid)
-        body = line_match.group(3).strip()
+        timestamp_text = line_match.group(3)
+        try:
+            self._current_timestamp = (
+                float(timestamp_text) if timestamp_text else None
+            )
+        except ValueError:
+            self._current_timestamp = None
+        body = line_match.group(4).strip()
 
         unfinished = _UNFINISHED.match(body)
         if unfinished is not None:
-            self._pending[pid_text] = (unfinished.group(1), f"{unfinished.group(1)}({unfinished.group(2)}")
+            self._pending[pid_text] = (
+                unfinished.group(1),
+                f"{unfinished.group(1)}({unfinished.group(2)}",
+                self._current_timestamp,
+            )
             return
 
         resumed = _RESUMED.match(body)
@@ -289,6 +308,11 @@ class StraceParser:
             if pending is None or pending[0] != syscall:
                 self.result.opaque_reasons.add(OPAQUE_TRACE_INCOMPLETE)
                 return
+            # Prefer the resumed line's completion time. If the producer did not
+            # timestamp the resumed fragment, fall back to the entry timestamp
+            # rather than losing task attribution entirely.
+            if self._current_timestamp is None:
+                self._current_timestamp = pending[2]
             body = pending[1] + suffix
             self.result.stitched_lines += 1
 
@@ -549,7 +573,7 @@ class StraceParser:
         )
 
     def finish(self) -> None:
-        for syscall, _prefix in self._pending.values():
+        for syscall, _prefix, _timestamp in self._pending.values():
             if syscall in OPEN_CALLS or syscall in READ_CALLS or syscall in WRITE_CALLS:
                 self.result.opaque_reasons.add(OPAQUE_TRACE_INCOMPLETE)
         self.result.opened_only = set(self.result.opened_readable)

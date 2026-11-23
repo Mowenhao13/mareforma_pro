@@ -142,8 +142,8 @@ What the new transport adds:
 - `openat`/read evidence and `internal_temp_files` for files written and then
   read by the same call/session;
 - `connect()` endpoint baselines and an optional local egress proxy;
-- a Python `sitecustomize.py` autohook for SQLite query digests and common
-  HTTP client URLs when `--db-hook` is enabled;
+- a Python `sitecustomize.py` autohook for HTTP response digests and DB
+  commands (SQLite, psycopg/psycopg2, and Redis) when `--db-hook` is enabled;
 - explicit `concurrent_call_overlap`, `egress_proxy_bypassed`,
   `egress_uninspected`, `db_uninspected`, and `https_path_opaque` diagnostics.
 
@@ -154,6 +154,60 @@ the patched `urllib`/`requests`/`httpx` surfaces; other DB drivers and native
 children require the generic proxy/strace path or a separate adapter. A
 shared long-running server process that is not started under this supervisor
 cannot be ptraced by a no-sudo user after the fact.
+
+## Task-scoped worker supervisor (0.5.0+)
+
+A second long-running path covers the worker process that executes queued tool
+tasks. It starts the unchanged worker as a child of `strace`, injects the
+Python autohook through `PYTHONPATH`, and signs one
+`mareforma_pro.rootless_receipt/v1` per task:
+
+```bash
+MAREFORMA_HMAC_SECRET='replace-with-a-private-secret' \
+mareforma-pro worker supervise \
+  --worker-id 1 \
+  --receipt-log ~/.mareforma/worker-1-receipts.jsonl \
+  --coverage-root /srv/biomni/tasks \
+  -- /path/to/worker-venv/bin/python /path/to/worker.py --worker-id 1
+```
+
+The observer must own the process launch; it cannot attach to an
+already-running systemd unit. Replace the unit's `ExecStart` with the command
+above. The child environment never receives `MAREFORMA_HMAC_SECRET`,
+`MAREFORMA_PRO_SECRET`, or `MAREFORMA_SECRET`; only the parent signs receipts.
+
+Task boundaries come from the worker's existing `BIOMNI_TASK_ID` transitions.
+`strace -ttt` timestamps are checked against those boundaries, so a FIFO line
+that arrives late is charged to the task active when the syscall completed, not
+to whichever task is active when the parser wakes up. When present,
+`BIOMNI_EXECUTION_ID` and `BIOMNI_ATTEMPT_DIR` are bound into the same scope. A
+child Python process inherits the current task id and its
+application events remain in that task, but it cannot open or close a second
+task scope. No worker source change is required for a Biomni-style runtime.
+
+Each receipt adds optional `task_id`, `worker_id`, `execution_id`, `attempt`,
+and `read_bytes` fields. It also carries:
+
+- `observed_files`, `opened_only`, `internal_temp_files`, and
+  `unmapped_paths` from the kernel-level `strace` stream;
+- `observed_http` rows containing a credential-free URL, method, status,
+  response-body byte count, response SHA-256, query digest, and query key
+  names for `urllib`, `requests`, and `httpx` calls observed before TLS;
+- `observed_db_queries` from `sqlite3`, `psycopg`, `psycopg2`, and `redis`,
+  including SQL text by default (disable with `--no-db-query-text`);
+- `observed_urls`, `observed_egress_urls`, `payload_digests`, and the normal
+  OPAQUE diagnostics.
+
+An unconsumed streaming response or a body that cannot be observed adds
+`OPAQUE(http_body_unobserved)`. Query values are omitted by default because
+presigned URLs commonly carry credentials; `--http-query-text` opts into the
+plaintext query and is not recommended for signed receipts. `--no-strace` is a
+diagnostic mode and always adds `OPAQUE(trace_incomplete)`.
+
+The worker's task receipt does not yet cryptographically bind to the MCP
+request's parent scope. Without a parent `scope_id` in the task environment, it
+can only be correlated through `task_id`, `request_id`, `execution_id`, and
+time. Do not present that correlation as a signed parent-child link.
 
 ## Grounding scope, not a truth score
 

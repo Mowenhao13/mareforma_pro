@@ -48,6 +48,12 @@ class ScopeRecord:
     coverage_roots: set[str] = field(default_factory=set)
     source_requirement: str = SOURCE_REQUIRED
     trace_complete: bool = True
+    task_id: str | None = None
+    worker_id: str | None = None
+    attempt: str | None = None
+    execution_id: str | None = None
+    read_bytes: int = 0
+    observed_http: list[dict[str, Any]] = field(default_factory=list)
 
     def merge(self, parsed: ParsedStrace) -> None:
         self.observed_files.update(parsed.observed_files)
@@ -109,6 +115,11 @@ class RootlessCollector:
         collector_mode: str | None = None,
         coverage_roots: Iterable[str] = (),
         source_requirement: str = SOURCE_REQUIRED,
+        opened_at: float | None = None,
+        task_id: str | None = None,
+        worker_id: str | None = None,
+        attempt: str | None = None,
+        execution_id: str | None = None,
     ) -> None:
         if not scope_id:
             raise ScopeError("scope_id must not be empty")
@@ -131,7 +142,7 @@ class RootlessCollector:
         self._scopes[scope_id] = ScopeRecord(
             scope_id=scope_id,
             resolver=resolver,
-            opened_at=float(self._clock()),
+            opened_at=float(self._clock() if opened_at is None else opened_at),
             traceparent=traceparent,
             parent_scope_id=parent_scope_id,
             evidence_level=evidence_level,
@@ -139,6 +150,10 @@ class RootlessCollector:
             collector_mode=collector_mode,
             coverage_roots=set(normalize_many(coverage)),
             source_requirement=source_requirement,
+            task_id=task_id,
+            worker_id=worker_id,
+            attempt=attempt,
+            execution_id=execution_id,
         )
 
     def _record(self, scope_id: str) -> ScopeRecord:
@@ -176,11 +191,16 @@ class RootlessCollector:
         observed_urls: Iterable[str] = (),
         observed_egress_urls: Iterable[str] = (),
         observed_dirs: Iterable[str] = (),
+        unmapped_paths: Iterable[str] = (),
         opened_only: Iterable[str] = (),
         internal_temp_files: Iterable[str] = (),
         observed_db_queries: Iterable[Mapping[str, Any]] = (),
+        observed_http: Iterable[Mapping[str, Any]] = (),
         payload_digests: Iterable[str] = (),
         opaque_reasons: Iterable[str] = (),
+        socket_events: Iterable[str] = (),
+        processes: Iterable[Mapping[str, Any]] = (),
+        read_bytes: int = 0,
     ) -> None:
         record = self._record(scope_id)
         files = normalize_many(observed_files)
@@ -193,6 +213,7 @@ class RootlessCollector:
         record.observed_urls.update(urls)
         record.observed_egress_urls.update(egress_urls)
         record.observed_dirs.update(dirs)
+        record.unmapped_paths.update(normalize_many(unmapped_paths))
         record.opened_only.update(opened)
         record.internal_temp_files.update(temp_files)
         record.opened_only.difference_update(record.observed_files)
@@ -203,8 +224,22 @@ class RootlessCollector:
             row = dict(item)
             if row not in record.observed_db_queries:
                 record.observed_db_queries.append(row)
+        for item in observed_http:
+            if not isinstance(item, Mapping):
+                raise ValueError("observed_http entries must be mappings")
+            row = dict(item)
+            if row not in record.observed_http:
+                record.observed_http.append(row)
         record.payload_digests.update(str(value) for value in payload_digests if value)
         record.opaque_reasons.update(str(value) for value in opaque_reasons if value)
+        record.socket_events.update(str(value) for value in socket_events if value)
+        for item in processes:
+            if isinstance(item, Mapping):
+                row = dict(item)
+                if row not in record.processes:
+                    record.processes.append(row)
+        if read_bytes > 0:
+            record.read_bytes += int(read_bytes)
 
     def close_scope(self, scope_id: str) -> ScopeEvidence:
         record = self._record(scope_id)
@@ -244,6 +279,12 @@ class RootlessCollector:
             parent_scope_id=record.parent_scope_id,
             coverage_roots=tuple(sorted(record.coverage_roots)),
             source_requirement=record.source_requirement,
+            task_id=record.task_id,
+            worker_id=record.worker_id,
+            attempt=record.attempt,
+            execution_id=record.execution_id,
+            read_bytes=record.read_bytes,
+            observed_http=tuple(record.observed_http),
         )
         unsigned = evidence.to_receipt_dict()
         signed = sign_receipt(unsigned, self._secret)

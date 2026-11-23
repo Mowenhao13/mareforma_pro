@@ -74,3 +74,11 @@ def test_run_fuse_cli_emits_a_read_bytes_receipt(tmp_path):
     assert result.exit_code == 0, result.output
     assert "collector_mode: fuse_read_proxy" in result.output
     assert "grounding: GROUNDED" in result.output
+
+
+def test_worker_supervise_help_documents_task_scoped_receipts():
+    result = CliRunner().invoke(cli, ["worker", "supervise", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "per-task observation scope" in result.output
+    assert "worker-receipts.jsonl" in result.output
+    assert "--no-strace" in result.output

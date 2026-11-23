@@ -328,6 +328,16 @@ a trusted MITM CA is authority level only, a pre-existing process cannot be
 attached without ptrace permission, and every unobserved channel remains
 `OPAQUE`.
 
+For a long-running task worker behind such a server,
+`mareforma-pro worker supervise` starts the unchanged process under the same rootless `strace` +
+Python-autohook stack and signs one task-scoped receipt at each
+`BIOMNI_TASK_ID` transition. The receipt binds the task/execution/attempt ids
+and adds `observed_http` rows (method, status, response bytes and SHA-256,
+credential-free URL, query digest), DB commands for SQLite/psycopg/Redis, and
+the file/temp-file read evidence. Task correlation to an MCP request remains
+logical (`task_id` / `request_id` / time), not a cryptographic parent link,
+until the worker receives a parent scope id from the application.
+
 ## Capabilities
 
 | What you get | What it does |

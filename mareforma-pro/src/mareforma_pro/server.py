@@ -133,6 +133,11 @@ class CollectorServer:
                         source_requirement=str(
                             request.get("source_requirement", "required")
                         ),
+                        opened_at=request.get("opened_at"),
+                        task_id=request.get("task_id"),
+                        worker_id=request.get("worker_id"),
+                        attempt=request.get("attempt"),
+                        execution_id=request.get("execution_id"),
                     )
                     return {"ok": True, "scope_id": scope_id}
                 if op == "ingest_strace":
@@ -157,11 +162,16 @@ class CollectorServer:
                         observed_urls=request.get("observed_urls") or (),
                         observed_egress_urls=request.get("observed_egress_urls") or (),
                         observed_dirs=request.get("observed_dirs") or (),
+                        unmapped_paths=request.get("unmapped_paths") or (),
                         opened_only=request.get("opened_only") or (),
                         internal_temp_files=request.get("internal_temp_files") or (),
                         observed_db_queries=request.get("observed_db_queries") or (),
+                        observed_http=request.get("observed_http") or (),
                         payload_digests=request.get("payload_digests") or (),
                         opaque_reasons=request.get("opaque_reasons") or (),
+                        socket_events=request.get("socket_events") or (),
+                        processes=request.get("processes") or (),
+                        read_bytes=int(request.get("read_bytes") or 0),
                     )
                     return {"ok": True, "scope_id": scope_id}
                 if op == "close_scope":

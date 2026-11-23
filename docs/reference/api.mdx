@@ -1848,3 +1848,70 @@ official MCP Streamable HTTP client, which keeps a GET SSE response open for
 server-initiated messages while subsequent POST requests continue. A POST
 that overlaps a live GET is marked `OPAQUE(concurrent_call_overlap)` because
 the shared process event stream cannot attribute those bytes to one request.
+
+### Task-scoped worker receipts (`WorkerProcessObserver`)
+
+`mareforma-pro` 0.5.0+ adds `WorkerProcessObserver` for an unchanged
+long-running task worker. It starts the worker as a child of `strace`, injects
+the Python autohook, observes `BIOMNI_TASK_ID` transitions, and signs one
+`mareforma_pro.rootless_receipt/v1` at each task boundary:
+
+```python
+from mareforma_pro import WorkerProcessObserver
+
+observer = WorkerProcessObserver(
+    ["/path/to/worker-venv/bin/python", "/path/to/worker.py"],
+    secret=secret,
+    worker_id="1",
+    receipt_log="~/.mareforma/worker-1-receipts.jsonl",
+    coverage_roots=["/srv/biomni/tasks"],
+)
+returncode = observer.run_forever()
+```
+
+The child never receives the HMAC secret. `BIOMNI_EXECUTION_ID` and the
+basename of `BIOMNI_ATTEMPT_DIR` are bound as `execution_id` and `attempt`.
+Only the root Python process can open or close a task; a child Python process
+inherits the task id and its HTTP/DB events remain in that scope without
+minting a second one. `strace -ttt` completion timestamps are matched against
+the task window, so a late FIFO line cannot be charged to the next task. Each
+task produces a receipt even when it read no
+external source, so an execution with zero evidence is visible instead of
+silently missing.
+
+The receipt adds optional `task_id`, `worker_id`, `execution_id`, `attempt`,
+and `read_bytes` fields. `observed_http` is a list of request rows:
+
+```json
+{
+  "request_id": "…",
+  "url": "https://rest.uniprot.org/uniprotkb/P04637",
+  "method": "GET",
+  "status": 200,
+  "body_bytes": 3812,
+  "body_digest": "sha256:…",
+  "body_observed": true,
+  "query_digest": "sha256:…",
+  "query_keys": ["format"]
+}
+```
+
+The URL omits userinfo, query values, and fragments. Query-key names and a
+digest of the raw query are signed instead; `record_http_query_text=True` adds
+the plaintext query when the operator explicitly accepts that risk.
+`observed_db_queries` adds `sqlite3`, `psycopg`, `psycopg2`, and `redis`
+commands, including SQL text by default (`record_query_text=False` disables
+it).
+
+An HTTP request whose response body is not consumed, or whose body cannot be
+observed, produces `OPAQUE(http_body_unobserved)`; a task still carries the
+attempt row with its status and query digest. `use_strace=False` is diagnostic
+only and always produces `OPAQUE(trace_incomplete)`.
+
+The worker receipt is not a cryptographic child of the MCP `CallReceipt`.
+Without a parent scope id intentionally propagated into the worker, the records
+are correlated only by `task_id`, `request_id`, `execution_id`, worker id, and
+time. Do not treat that correlation as a signed parent link. `mmap`-based
+reads, `io_uring`, direct syscalls, and HTTP transports not patched by the
+autohook remain outside the claim; strace may report the generic
+`trace_incomplete` boundary where it can see them.

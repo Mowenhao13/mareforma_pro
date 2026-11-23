@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## [mareforma-pro 0.5.0] - 2026-11-23
+
+### Added
+
+- **Task-scoped worker supervision.** `mareforma-pro worker supervise` and
+  `WorkerProcessObserver` start an unchanged long-running worker under
+  `strace --seccomp-bpf -f -ttt -yy`, inject the Python autohook, follow
+  `BIOMNI_TASK_ID` transitions, and sign one
+  `mareforma_pro.rootless_receipt/v1` per task. Receipts add optional
+  `task_id`, `worker_id`, `execution_id`, `attempt`, and `read_bytes` fields.
+  The child never receives the HMAC secret.
+- **HTTP response evidence at the application seam.** The autohook now records
+  `observed_http` rows with method, status, response byte count, response
+  SHA-256, credential-free URL, query digest, and query key names for
+  `urllib`, `requests`, and `httpx`. `httpx.Client.send` and
+  `AsyncClient.send` are hooked so streaming requests are covered; unconsumed
+  bodies fail closed as `OPAQUE(http_body_unobserved)`.
+- **Database command evidence.** SQLite, psycopg, psycopg2, and Redis command
+  hooks now feed `observed_db_queries`. Worker mode records SQL/Redis text by
+  default and can disable it with `--no-db-query-text`.
+- **Child-process task isolation.** Python children inherit the active task id
+  and contribute events to it, but only the root worker can open or close a
+  task scope. This prevents one inherited task context from producing duplicate
+  task receipts.
+
+### Changed
+
+- **MCP HTTP receipts use completed autohook bodies.** A body-observed
+  `urllib`/`requests`/`httpx` response now contributes `observed_urls` and its
+  body digest to a long-running MCP call instead of leaving the URL merely
+  listed as egress.
+
+### Security
+
+- **URL query values stay out of signed receipts by default.** Query values can
+  carry presigned credentials; the receipt carries their SHA-256 and key names.
+  `--http-query-text` / `record_http_query_text=True` is an explicit opt-in.
+- **Task receipts remain honestly short of parent binding.** Without a parent
+  scope id propagated into the worker, the task receipt is correlated to the
+  MCP request only by `task_id`, `request_id`, `execution_id`, worker id, and
+  time. It is not a cryptographic child receipt.
+
 ## [mareforma-pro 0.4.1] - 2026-11-23
 
 ### Fixed

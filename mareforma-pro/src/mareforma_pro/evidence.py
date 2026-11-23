@@ -37,6 +37,7 @@ OPAQUE_EGRESS_PROXY_BYPASSED = "egress_proxy_bypassed"
 OPAQUE_EGRESS_UNINSPECTED = "egress_uninspected"
 OPAQUE_DB_UNINSPECTED = "db_uninspected"
 OPAQUE_HTTPS_PATH_OPAQUE = "https_path_opaque"
+OPAQUE_HTTP_BODY_UNOBSERVED = "http_body_unobserved"
 
 # Whether this observation was expected to read an external source. Most scopes
 # default to ``required``. A pure computation can explicitly say that no external
@@ -62,6 +63,7 @@ OPAQUE_REASONS = frozenset(
         OPAQUE_EGRESS_UNINSPECTED,
         OPAQUE_DB_UNINSPECTED,
         OPAQUE_HTTPS_PATH_OPAQUE,
+        OPAQUE_HTTP_BODY_UNOBSERVED,
     }
 )
 
@@ -220,6 +222,14 @@ class ScopeEvidence:
     internal_temp_files: tuple[str, ...] = ()
     observed_egress_urls: tuple[str, ...] = ()
     observed_db_queries: tuple[Mapping[str, Any], ...] = ()
+    # Worker-mode fields. These are optional so existing scope receipts keep
+    # their old signed shape and byte-identical serialization when absent.
+    task_id: str | None = None
+    worker_id: str | None = None
+    attempt: str | None = None
+    execution_id: str | None = None
+    read_bytes: int = 0
+    observed_http: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -248,6 +258,17 @@ class ScopeEvidence:
                 seen_db_queries.add(key)
                 normalized_db_queries.append(row)
         object.__setattr__(self, "observed_db_queries", tuple(normalized_db_queries))
+        normalized_http: list[Mapping[str, Any]] = []
+        seen_http: set[str] = set()
+        for item in self.observed_http or ():
+            if not isinstance(item, Mapping):
+                raise ValueError("observed_http entries must be mappings")
+            row = dict(item)
+            key = repr(sorted(row.items(), key=lambda pair: str(pair[0])))
+            if key not in seen_http:
+                seen_http.add(key)
+                normalized_http.append(row)
+        object.__setattr__(self, "observed_http", tuple(normalized_http))
         if self.source_requirement not in SOURCE_REQUIREMENTS:
             raise ValueError(
                 "source_requirement must be one of: "
@@ -292,6 +313,18 @@ class ScopeEvidence:
             receipt["observed_egress_urls"] = list(self.observed_egress_urls)
         if self.observed_db_queries:
             receipt["observed_db_queries"] = [dict(row) for row in self.observed_db_queries]
+        if self.observed_http:
+            receipt["observed_http"] = [dict(row) for row in self.observed_http]
+        if self.task_id:
+            receipt["task_id"] = self.task_id
+        if self.worker_id:
+            receipt["worker_id"] = self.worker_id
+        if self.attempt:
+            receipt["attempt"] = self.attempt
+        if self.execution_id:
+            receipt["execution_id"] = self.execution_id
+        if self.read_bytes:
+            receipt["read_bytes"] = int(self.read_bytes)
         return receipt
 
     @classmethod
@@ -330,6 +363,16 @@ class ScopeEvidence:
                 for row in receipt.get("observed_db_queries") or ()
                 if isinstance(row, Mapping)
             ),
+            observed_http=tuple(
+                dict(row)
+                for row in receipt.get("observed_http") or ()
+                if isinstance(row, Mapping)
+            ),
+            task_id=receipt.get("task_id"),
+            worker_id=receipt.get("worker_id"),
+            attempt=receipt.get("attempt"),
+            execution_id=receipt.get("execution_id"),
+            read_bytes=int(receipt.get("read_bytes") or 0),
             hmac_signature=receipt.get("hmac_signature"),
         )
 

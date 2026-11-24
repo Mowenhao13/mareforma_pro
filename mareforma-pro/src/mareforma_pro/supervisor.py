@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -79,6 +80,166 @@ def _json_value(value: Any) -> str | None:
     if isinstance(value, (str, int, float, bool)):
         return str(value)
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+_MAX_DISPATCH_RESPONSE = 4 * 1024 * 1024
+_TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+_SCOPE_PATTERN = re.compile(r"^[A-Za-z0-9:_.-]{1,160}$")
+_TRACEPARENT_PATTERN = re.compile(r"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
+
+
+def _task_id_candidate(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or not _TASK_ID_PATTERN.fullmatch(candidate):
+        return None
+    return candidate
+
+
+def _collect_task_id_candidates(value: Any, out: set[str]) -> None:
+    if not isinstance(value, Mapping):
+        return
+    task_id = _task_id_candidate(value.get("task_id"))
+    if task_id:
+        out.add(task_id)
+
+
+def _scope_candidate(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate if _SCOPE_PATTERN.fullmatch(candidate) else None
+
+
+def _traceparent_candidate(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().lower()
+    return candidate if _TRACEPARENT_PATTERN.fullmatch(candidate) else None
+
+
+def _inject_mcp_metadata(
+    body: bytes,
+    *,
+    scope_id: str,
+    traceparent: str | None = None,
+) -> bytes:
+    """Inject Mareforma correlation fields into ``tools/call`` params.
+
+    The supervisor can generate the scope itself, so an existing MCP client does
+    not need to understand Mareforma metadata. Existing valid values are kept;
+    only missing or malformed fields are filled. Non-``tools/call`` requests are
+    left byte-for-byte unchanged.
+    """
+    if not body:
+        return body
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body
+    is_batch = isinstance(payload, list)
+    items = payload if is_batch else [payload]
+    changed = False
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping) or item.get("method") != "tools/call":
+            continue
+        params = item.get("params")
+        if not isinstance(params, Mapping):
+            continue
+        meta = params.get("_meta")
+        if meta is not None and not isinstance(meta, Mapping):
+            continue
+        merged = dict(meta) if isinstance(meta, Mapping) else {}
+        item_changed = False
+        if _scope_candidate(merged.get("mareforma_scope_id")) is None:
+            merged["mareforma_scope_id"] = scope_id
+            item_changed = True
+        if traceparent and _traceparent_candidate(merged.get("traceparent")) is None:
+            merged["traceparent"] = traceparent
+            item_changed = True
+        if item_changed:
+            rewritten = dict(item)
+            rewritten_params = dict(params)
+            rewritten_params["_meta"] = merged
+            rewritten["params"] = rewritten_params
+            if is_batch:
+                payload[index] = rewritten
+            else:
+                payload = rewritten
+            changed = True
+    if not changed:
+        return body
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def _body_has_scope(body: bytes, scope_id: str) -> bool:
+    """Return true when every ``tools/call`` item carries *scope_id*."""
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    items = payload if isinstance(payload, list) else [payload]
+    calls = [
+        item
+        for item in items
+        if isinstance(item, Mapping) and item.get("method") == "tools/call"
+    ]
+    if not calls:
+        return False
+    for item in calls:
+        params = item.get("params")
+        meta = params.get("_meta") if isinstance(params, Mapping) else None
+        if not isinstance(meta, Mapping):
+            return False
+        if _scope_candidate(meta.get("mareforma_scope_id")) != scope_id:
+            return False
+    return True
+
+
+def _extract_dispatched_task_ids(body: bytes) -> tuple[str, ...]:
+    """Extract a task id carried by a successful MCP ``tools/call`` response.
+
+    The response is signed into the CallReceipt by the supervisor. This is the
+    gateway half of the two-link chain; matching a worker receipt also requires
+    the worker's signed ``task_id`` and ``parent_scope_id``. A response with
+    conflicting candidate ids is rejected rather than guessed.
+    """
+    if not body or len(body) > _MAX_DISPATCH_RESPONSE:
+        return ()
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ()
+    items = payload if isinstance(payload, list) else [payload]
+    candidates: set[str] = set()
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        result = item.get("result")
+        if not isinstance(result, Mapping) or result.get("isError") is True:
+            continue
+        _collect_task_id_candidates(result, candidates)
+        structured = result.get("structuredContent")
+        _collect_task_id_candidates(structured, candidates)
+        content = result.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, Mapping) or part.get("type") != "text":
+                    continue
+                text = part.get("text")
+                if not isinstance(text, str):
+                    continue
+                try:
+                    nested = json.loads(text)
+                except (TypeError, ValueError):
+                    continue
+                _collect_task_id_candidates(nested, candidates)
+    if len(candidates) != 1:
+        return ()
+    return (next(iter(candidates)),)
 
 
 def _extract_mcp_metadata(body: bytes) -> dict[str, Any]:
@@ -569,6 +730,7 @@ class MCPWorker:
         response_digest: str | None = None,
         session_id: str | None = None,
         forced_opaque: Iterable[str] = (),
+        dispatched_task_ids: Iterable[str] = (),
     ) -> CallReceipt:
         drained = True
         if self.stream is not None:
@@ -620,6 +782,7 @@ class MCPWorker:
                 http_status=http_status,
                 traceparent=self._active_traceparent,
                 parent_scope_id=self._active_parent_scope_id,
+                dispatched_task_ids=dispatched_task_ids,
                 **kwargs,
             )
             with self._sessions_lock:
@@ -814,7 +977,7 @@ class _SupervisorHTTPServer(ThreadingHTTPServer):
 
 class _MCPHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "mareforma-pro-supervisor/0.5.0"
+    server_version = "mareforma-pro-supervisor/0.6.0"
     sys_version = ""
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -1074,18 +1237,35 @@ class MCPProcessSupervisor:
     def handle(self, handler: BaseHTTPRequestHandler) -> None:
         body = self._request_body(handler)
         meta = _extract_mcp_metadata(body)
-        header_scope = handler.headers.get("X-Mareforma-Scope-Id")
-        header_trace = handler.headers.get("traceparent")
+        header_scope = _scope_candidate(handler.headers.get("X-Mareforma-Scope-Id"))
+        header_trace = _traceparent_candidate(handler.headers.get("traceparent"))
         header_session = handler.headers.get("Mcp-Session-Id") or handler.headers.get(
             "X-MCP-Session-Id"
         )
         if handler.command in {"GET", "DELETE"}:
             self._handle_stream(handler, body=body, session_id=header_session)
             return
-        scope_id = str(meta.get("scope_id") or header_scope or f"mcp:{uuid4().hex}")
-        traceparent = str(meta.get("traceparent") or header_trace or "") or None
-        session_id = header_session or f"mcp-anon:{uuid4().hex}"
         method = str(meta.get("method") or handler.command or "")
+        methods = tuple(str(value) for value in (meta.get("methods") or ()))
+        has_tools_call = method == "tools/call" or "tools/call" in methods
+        scope_id = (
+            _scope_candidate(meta.get("scope_id"))
+            or header_scope
+            or f"mcp_{uuid4().hex}"
+        )
+        traceparent = _traceparent_candidate(meta.get("traceparent")) or header_trace
+        if has_tools_call:
+            body = _inject_mcp_metadata(
+                body,
+                scope_id=scope_id,
+                traceparent=traceparent,
+            )
+        response_scope_id = (
+            scope_id
+            if has_tools_call and _body_has_scope(body, scope_id)
+            else None
+        )
+        session_id = header_session or f"mcp-anon:{uuid4().hex}"
         request_id = meta.get("request_id")
         worker: MCPWorker | None = None
         call_started = False
@@ -1101,8 +1281,13 @@ class MCPProcessSupervisor:
             )
             call_started = True
             upstream_headers = self._upstream_headers(handler, worker, body)
-            status, response_digest, response_session = self._forward(
-                handler, worker, upstream_headers, body
+            status, response_digest, response_session, dispatched_task_ids = self._forward(
+                handler,
+                worker,
+                upstream_headers,
+                body,
+                capture_response=has_tools_call,
+                response_scope_id=response_scope_id,
             )
             if response_session:
                 session_id = response_session
@@ -1111,6 +1296,7 @@ class MCPProcessSupervisor:
                 http_status=status,
                 response_digest=response_digest,
                 session_id=session_id,
+                dispatched_task_ids=dispatched_task_ids,
             )
             self._remember_call(call)
         except TimeoutError as exc:
@@ -1183,7 +1369,10 @@ class MCPProcessSupervisor:
         worker: MCPWorker,
         headers: Mapping[str, str],
         body: bytes,
-    ) -> tuple[int, str, str | None]:
+        *,
+        capture_response: bool = False,
+        response_scope_id: str | None = None,
+    ) -> tuple[int, str, str | None, tuple[str, ...]]:
         conn = http.client.HTTPConnection(worker.host, worker.port, timeout=600)
         try:
             conn.request(handler.command, self._request_target(handler), body=body, headers=dict(headers))
@@ -1196,11 +1385,16 @@ class MCPProcessSupervisor:
             content_length = response.getheader("Content-Length")
             send_chunked = content_length is None and handler.command != "HEAD"
             handler.send_response_only(status, response.reason)
+            upstream_scope_header = False
             for key, value in response_headers:
                 lower = key.lower()
                 if lower in _HOP_BY_HOP or lower == "content-length":
                     continue
+                if lower == "x-mareforma-scope-id":
+                    upstream_scope_header = True
                 handler.send_header(key, value)
+            if response_scope_id and not upstream_scope_header:
+                handler.send_header("X-Mareforma-Scope-Id", response_scope_id)
             if content_length is not None:
                 handler.send_header("Content-Length", content_length)
             elif send_chunked:
@@ -1208,6 +1402,7 @@ class MCPProcessSupervisor:
             handler.send_header("Connection", "close")
             handler.end_headers()
             digest = hashlib.sha256()
+            captured = bytearray()
             sent = 0
             while True:
                 # read1() returns as soon as some decoded bytes are available.
@@ -1217,6 +1412,9 @@ class MCPProcessSupervisor:
                 if not chunk:
                     break
                 digest.update(chunk)
+                if capture_response and len(captured) < _MAX_DISPATCH_RESPONSE:
+                    remaining = _MAX_DISPATCH_RESPONSE - len(captured)
+                    captured.extend(chunk[:remaining])
                 if handler.command == "HEAD":
                     continue
                 if send_chunked:
@@ -1228,7 +1426,17 @@ class MCPProcessSupervisor:
             if send_chunked:
                 handler.wfile.write(b"0\r\n\r\n")
                 handler.wfile.flush()
-            return status, "sha256:" + digest.hexdigest(), response_session
+            dispatched_task_ids = (
+                _extract_dispatched_task_ids(bytes(captured))
+                if capture_response
+                else ()
+            )
+            return (
+                status,
+                "sha256:" + digest.hexdigest(),
+                response_session,
+                dispatched_task_ids,
+            )
         finally:
             conn.close()
 

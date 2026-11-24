@@ -7,6 +7,38 @@ The authoritative changelog lives in [CHANGELOG.md](https://github.com/mareforma
 This page mirrors it section for section from v0.3.1 on. v0.3.0 and the
 0.2.x line are summarized here; read CHANGELOG.md for their full entries.
 
+## v0.6.0
+
+### Added
+
+- **Two-link MCP-to-worker parent binding.** A successful MCP `tools/call`
+  response whose JSON carries exactly one `task_id` now contributes a signed
+  `dispatched_task_ids` field to the supervisor's `CallReceipt`. The
+  supervisor reads `result.task_id`, `result.structuredContent.task_id`, or a
+  JSON object in a `result.content[*].text` part. `verify_task_chain()` then
+  verifies the gateway and worker HMACs and requires the worker's signed
+  `task_id` to be in that dispatched set and its signed `parent_scope_id` to
+  equal the CallReceipt `scope_id`. The parent relation no longer depends on a
+  time window.
+- **Explicit chain statuses.** `TaskChainVerdict` reports `LINKED`, invalid
+  call/worker receipts, missing gateway or worker IDs, or a task/parent-scope
+  mismatch. Callers treat every status other than `LINKED` as `OPAQUE`.
+- **Transparent MCP metadata injection.** For `tools/call`, the supervisor now
+  generates and injects `params._meta.mareforma_scope_id` when the client omits
+  it or sends an invalid value. Existing valid client values are preserved,
+  other `_meta` keys are kept, and a valid request-header `traceparent` is
+  copied into the body when needed. The rewritten body gets a corrected
+  `Content-Length`, and the response exposes `X-Mareforma-Scope-Id` for
+  correlation. Existing agents therefore do not need Mareforma-aware client
+  code to establish the gateway half of the chain.
+
+### Security
+
+- **Conflicting task ids fail closed.** A response with zero or more than one
+  distinct valid `task_id`, an `isError: true` result, a non-JSON body, or a
+  body larger than 4 MiB contributes no dispatched id. A missing worker
+  `parent_scope_id` remains a non-link, not an inferred match.
+
 ## [mareforma-pro 0.5.0] - 2026-11-23
 
 ### Added

@@ -10,7 +10,7 @@ its own: packaging brings the Mareforma epistemic graph along as its engine, so
 one command gives you the full stack.
 
 ```bash
-uv add mareforma-pro
+uv add "mareforma-pro==0.6.0"
 ```
 
 Compared with core `mareforma`, `mareforma-pro` upgrades observation from a
@@ -79,6 +79,16 @@ The supervisor also injects loopback `HOST` / `MCP_HOST` / `UVICORN_HOST` /
 If the server reads its bind host from a fixed config file, change that config
 to `127.0.0.1`; otherwise port `18000` may remain directly reachable and bypass
 the receipt boundary.
+
+For `tools/call`, the supervisor also injects Mareforma correlation metadata
+transparently. If the client omits `params._meta.mareforma_scope_id`, or sends
+an invalid value, the supervisor generates a unique `mcp_<uuid>` scope, rewrites
+the forwarded JSON body, and updates `Content-Length`. Existing valid client
+scopes and unrelated `_meta` keys are preserved. A valid `traceparent` request
+header is copied into `_meta` when the body does not already carry one. The
+response includes `X-Mareforma-Scope-Id` so the caller can correlate the
+generated scope with its `CallReceipt`. No client-side Mareforma integration is
+required for this half of the chain.
 
 ### Keep the remote endpoint on port 18000
 

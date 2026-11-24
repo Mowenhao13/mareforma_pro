@@ -15,12 +15,24 @@ from typing import Any, Iterable, Mapping
 
 from .evidence import normalize_many, normalize_path
 from .errors import ReceiptError
-from .receipt import canonical_bytes, sign_payload, verify_payload
+from .receipt import canonical_bytes, sign_payload, verify_payload, verify_scope_receipt
 
 CALL_RECEIPT_SCHEMA = "mareforma_pro.mcp_call_receipt/v1"
 SESSION_RECEIPT_SCHEMA = "mareforma_pro.mcp_session_receipt/v1"
+TASK_CHAIN_VERDICT_SCHEMA = "mareforma_pro.task_chain_verdict/v1"
 CALL_RECEIPT_DOMAIN = b"mareforma_pro.mcp_call_receipt/v1\n"
 SESSION_RECEIPT_DOMAIN = b"mareforma_pro.mcp_session_receipt/v1\n"
+
+# Statuses for the two-link MCP -> worker chain. Only ``LINKED`` is positive;
+# every other value is an explicit refusal to infer a parent relationship.
+TASK_CHAIN_LINKED = "LINKED"
+TASK_CHAIN_CALL_RECEIPT_INVALID = "CALL_RECEIPT_INVALID"
+TASK_CHAIN_WORKER_RECEIPT_INVALID = "WORKER_RECEIPT_INVALID"
+TASK_CHAIN_MISSING_GATEWAY_TASK_ID = "MISSING_GATEWAY_TASK_ID"
+TASK_CHAIN_MISSING_WORKER_TASK_ID = "MISSING_WORKER_TASK_ID"
+TASK_CHAIN_MISSING_WORKER_PARENT_SCOPE = "MISSING_WORKER_PARENT_SCOPE"
+TASK_CHAIN_TASK_ID_MISMATCH = "TASK_ID_MISMATCH"
+TASK_CHAIN_PARENT_SCOPE_MISMATCH = "PARENT_SCOPE_MISMATCH"
 
 
 def _dedupe(values: Iterable[str]) -> tuple[str, ...]:
@@ -81,6 +93,10 @@ class CallReceipt:
     collector_mode: str = "mcp_process_supervisor"
     schema_version: str = CALL_RECEIPT_SCHEMA
     hmac_signature: str | None = None
+    # Append-only field for the signed gateway half of a two-link task chain.
+    # It is omitted from the wire shape when empty so pre-existing receipts
+    # remain byte-identical.
+    dispatched_task_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -93,13 +109,14 @@ class CallReceipt:
             "opaque_reasons",
             "payload_digests",
             "socket_events",
+            "dispatched_task_ids",
         ):
             object.__setattr__(self, name, _dedupe(getattr(self, name) or ()))
         object.__setattr__(self, "observed_db_queries", _db_rows(self.observed_db_queries))
         object.__setattr__(self, "processes", tuple(dict(row) for row in self.processes or ()))
 
     def to_receipt_dict(self) -> dict[str, Any]:
-        return {
+        receipt = {
             "schema_version": self.schema_version,
             "call_id": self.call_id,
             "scope_id": self.scope_id,
@@ -127,6 +144,9 @@ class CallReceipt:
             "collector_mode": self.collector_mode,
             "hmac_signature": self.hmac_signature,
         }
+        if self.dispatched_task_ids:
+            receipt["dispatched_task_ids"] = list(self.dispatched_task_ids)
+        return receipt
 
     @classmethod
     def from_receipt_dict(cls, payload: Mapping[str, Any]) -> "CallReceipt":
@@ -159,6 +179,7 @@ class CallReceipt:
             evidence_level=str(payload.get("evidence_level", "USER_TRACE")),
             collector_mode=str(payload.get("collector_mode", "mcp_process_supervisor")),
             hmac_signature=payload.get("hmac_signature"),
+            dispatched_task_ids=tuple(payload.get("dispatched_task_ids") or ()),
         )
 
 
@@ -269,6 +290,155 @@ def verify_call_receipt(
     return receipt
 
 
+@dataclass(frozen=True)
+class TaskChainVerdict:
+    """The result of checking one signed gateway half against one worker half.
+
+    The verdict is unsigned derived state. It names the two receipt digests it
+    was computed from, so a caller can retain it as an audit note without
+    mistaking it for a third signature.
+    """
+
+    status: str
+    call_scope_id: str | None = None
+    call_task_ids: tuple[str, ...] = ()
+    worker_scope_id: str | None = None
+    worker_task_id: str | None = None
+    worker_parent_scope_id: str | None = None
+    execution_id: str | None = None
+    attempt: str | None = None
+    call_receipt_digest: str | None = None
+    worker_receipt_digest: str | None = None
+    detail: str = ""
+    schema_version: str = TASK_CHAIN_VERDICT_SCHEMA
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "call_task_ids", _dedupe(self.call_task_ids or ()))
+
+    @property
+    def linked(self) -> bool:
+        return self.status == TASK_CHAIN_LINKED
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status,
+            "linked": self.linked,
+            "call_scope_id": self.call_scope_id,
+            "call_task_ids": list(self.call_task_ids),
+            "worker_scope_id": self.worker_scope_id,
+            "worker_task_id": self.worker_task_id,
+            "worker_parent_scope_id": self.worker_parent_scope_id,
+            "execution_id": self.execution_id,
+            "attempt": self.attempt,
+            "call_receipt_digest": self.call_receipt_digest,
+            "worker_receipt_digest": self.worker_receipt_digest,
+            "detail": self.detail,
+        }
+
+
+def _mapping_digest(payload: Mapping[str, Any]) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    try:
+        return receipt_digest(payload)
+    except (TypeError, ValueError):
+        return None
+
+
+def verify_task_chain(
+    call_receipt: Mapping[str, Any],
+    worker_receipt: Mapping[str, Any],
+    secret: str | bytes,
+    *,
+    worker_secret: str | bytes | None = None,
+    now: float | None = None,
+) -> TaskChainVerdict:
+    """Verify a gateway-to-worker parent chain without using a time window.
+
+    The gateway ``CallReceipt`` must carry a signed ``dispatched_task_ids``
+    entry supplied by the MCP response. The worker ``ScopeEvidence`` receipt
+    must carry the same signed ``task_id`` and a signed ``parent_scope_id``
+    equal to the gateway receipt's ``scope_id``. Both HMACs are verified before
+    either relation is considered.
+
+    ``secret`` verifies the gateway receipt. Pass ``worker_secret`` only when
+    the worker collector was configured with a different secret. A missing
+    field, a bad signature, or a mismatch returns an explicit non-linked
+    status; this function never raises those conditions into a positive link.
+    Use :attr:`TaskChainVerdict.linked` as the single positive test.
+    """
+    call_digest = _mapping_digest(call_receipt)
+    worker_digest = _mapping_digest(worker_receipt)
+    try:
+        call = verify_call_receipt(call_receipt, secret, now=now)
+    except (ReceiptError, TypeError, ValueError) as exc:
+        return TaskChainVerdict(
+            status=TASK_CHAIN_CALL_RECEIPT_INVALID,
+            call_receipt_digest=call_digest,
+            worker_receipt_digest=worker_digest,
+            detail=str(exc)[:500],
+        )
+    selected_worker_secret = secret if worker_secret is None else worker_secret
+    try:
+        verified_worker = verify_scope_receipt(
+            worker_receipt, selected_worker_secret, now=now
+        )
+    except (ReceiptError, TypeError, ValueError) as exc:
+        return TaskChainVerdict(
+            status=TASK_CHAIN_WORKER_RECEIPT_INVALID,
+            call_scope_id=call.scope_id,
+            call_task_ids=call.dispatched_task_ids,
+            call_receipt_digest=call_digest,
+            worker_receipt_digest=worker_digest,
+            detail=str(exc)[:500],
+        )
+
+    worker = verified_worker.evidence
+    fields = {
+        "call_scope_id": call.scope_id,
+        "call_task_ids": call.dispatched_task_ids,
+        "worker_scope_id": worker.scope_id,
+        "worker_task_id": worker.task_id,
+        "worker_parent_scope_id": worker.parent_scope_id,
+        "execution_id": worker.execution_id,
+        "attempt": worker.attempt,
+        "call_receipt_digest": call_digest,
+        "worker_receipt_digest": worker_digest,
+    }
+    if not call.dispatched_task_ids:
+        return TaskChainVerdict(
+            status=TASK_CHAIN_MISSING_GATEWAY_TASK_ID,
+            detail="the signed CallReceipt carries no dispatched task id",
+            **fields,
+        )
+    if not worker.task_id:
+        return TaskChainVerdict(
+            status=TASK_CHAIN_MISSING_WORKER_TASK_ID,
+            detail="the signed worker receipt carries no task_id",
+            **fields,
+        )
+    if not worker.parent_scope_id:
+        return TaskChainVerdict(
+            status=TASK_CHAIN_MISSING_WORKER_PARENT_SCOPE,
+            detail="the signed worker receipt carries no parent_scope_id",
+            **fields,
+        )
+    if worker.task_id not in call.dispatched_task_ids:
+        return TaskChainVerdict(
+            status=TASK_CHAIN_TASK_ID_MISMATCH,
+            detail="the worker task_id is not in the CallReceipt dispatched set",
+            **fields,
+        )
+    if worker.parent_scope_id != call.scope_id:
+        return TaskChainVerdict(
+            status=TASK_CHAIN_PARENT_SCOPE_MISMATCH,
+            detail="the worker parent_scope_id does not equal the CallReceipt scope_id",
+            **fields,
+        )
+    return TaskChainVerdict(status=TASK_CHAIN_LINKED, **fields)
+
+
 def build_call_receipt(
     *,
     call_id: str,
@@ -296,6 +466,7 @@ def build_call_receipt(
     parent_scope_id: str | None = None,
     evidence_level: str = "USER_TRACE",
     collector_mode: str = "mcp_process_supervisor",
+    dispatched_task_ids: Iterable[str] = (),
 ) -> CallReceipt:
     start = time.time() if started_at is None else float(started_at)
     end = time.time() if closed_at is None else float(closed_at)
@@ -324,6 +495,7 @@ def build_call_receipt(
         parent_scope_id=parent_scope_id,
         evidence_level=evidence_level,
         collector_mode=collector_mode,
+        dispatched_task_ids=tuple(dispatched_task_ids),
     )
     return sign_call_receipt(receipt, secret)
 

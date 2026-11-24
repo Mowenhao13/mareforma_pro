@@ -152,7 +152,7 @@ The claim now carries `GROUNDED` as a computed fact, not a self-reported label. 
 ## Install
 
 ```bash
-uv add mareforma-pro    # the upgraded observation library (brings the graph with it)
+uv add "mareforma-pro==0.6.0"    # the upgraded observation library (brings the graph with it)
 mareforma bootstrap     # optional: sign your claims and enable the public log
 ```
 
@@ -332,7 +332,10 @@ does not starve later `tools/list` requests. A POST overlapping that stream is
 marked `OPAQUE(concurrent_call_overlap)`. The same limits apply: HTTPS without
 a trusted MITM CA is authority level only, a pre-existing process cannot be
 attached without ptrace permission, and every unobserved channel remains
-`OPAQUE`.
+`OPAQUE`. For `tools/call`, the supervisor injects a unique
+`params._meta.mareforma_scope_id` when the client omits one, preserves a valid
+client value, and returns the effective scope in `X-Mareforma-Scope-Id`; an
+unchanged agent does not need Mareforma-aware client code.
 
 For a long-running task worker behind such a server,
 `mareforma-pro worker supervise` starts the unchanged process under the same rootless `strace` +

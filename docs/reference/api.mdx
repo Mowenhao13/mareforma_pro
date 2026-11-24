@@ -1849,6 +1849,16 @@ server-initiated messages while subsequent POST requests continue. A POST
 that overlaps a live GET is marked `OPAQUE(concurrent_call_overlap)` because
 the shared process event stream cannot attribute those bytes to one request.
 
+For `tools/call`, the supervisor injects
+`params._meta.mareforma_scope_id` before forwarding when the client omits it
+or supplies an invalid value. It preserves an existing valid client scope and
+all unrelated `_meta` keys, copies a valid request-header `traceparent` into
+the body when needed, and rewrites `Content-Length`. The generated scope is
+returned in the `X-Mareforma-Scope-Id` response header and signed into the
+`CallReceipt`. This makes an unchanged MCP client sufficient for the gateway
+half of the chain; the server still has to persist the injected metadata for a
+worker to receive the matching parent scope.
+
 ### Task-scoped worker receipts (`WorkerProcessObserver`)
 
 `mareforma-pro` 0.5.0+ adds `WorkerProcessObserver` for an unchanged
@@ -1917,10 +1927,45 @@ observed, produces `OPAQUE(http_body_unobserved)`; a task still carries the
 attempt row with its status and query digest. `use_strace=False` is diagnostic
 only and always produces `OPAQUE(trace_incomplete)`.
 
-The worker receipt is not a cryptographic child of the MCP `CallReceipt`.
-Without a parent scope id intentionally propagated into the worker, the records
-are correlated only by `task_id`, `request_id`, `execution_id`, worker id, and
-time. Do not treat that correlation as a signed parent link. `mmap`-based
-reads, `io_uring`, direct syscalls, and HTTP transports not patched by the
-autohook remain outside the claim; strace may report the generic
+### Two-link MCP-to-worker chain (`verify_task_chain`)
+
+`mareforma-pro` 0.6.0+ can bind a worker receipt to an MCP call without a time
+window. For a successful `tools/call`, the supervisor extracts exactly one
+valid `task_id` from `result.task_id`,
+`result.structuredContent.task_id`, or a JSON object in
+`result.content[*].text`, and signs it into
+`CallReceipt.dispatched_task_ids`. The worker receipt signs its own `task_id`
+and the `parent_scope_id` supplied through the configured parent-scope
+environment variable.
+
+```python
+from mareforma_pro import verify_task_chain
+
+verdict = verify_task_chain(
+    call_receipt,
+    worker_receipt,
+    supervisor_secret,
+    worker_secret=worker_secret,  # optional when both use the same secret
+)
+if verdict.linked:
+    assert verdict.worker_parent_scope_id == verdict.call_scope_id
+    assert verdict.worker_task_id in verdict.call_task_ids
+```
+
+The verifier checks both HMACs before comparing ids. It never uses
+`started_at`, `closed_at`, or the overlapping task window for matching. The
+positive status is `LINKED`; other statuses name the missing half or mismatch:
+`CALL_RECEIPT_INVALID`, `WORKER_RECEIPT_INVALID`,
+`MISSING_GATEWAY_TASK_ID`, `MISSING_WORKER_TASK_ID`,
+`MISSING_WORKER_PARENT_SCOPE`, `TASK_ID_MISMATCH`, and
+`PARENT_SCOPE_MISMATCH`. Treat every non-`LINKED` result as `OPAQUE`.
+
+If the MCP response has no task id or more than one distinct candidate, the
+gateway signs no dispatched id. The supervisor supplies the request scope to
+the server, but if the application does not persist that injected `_meta` and
+propagate it to the worker, the worker signs no parent scope. In both cases the
+chain remains unlinked; `task_id`, `request_id`, `execution_id`, worker id, and
+time are correlation hints only, never a substitute for the two signatures.
+`mmap`-based reads, `io_uring`, direct syscalls, and HTTP transports not patched
+by the autohook remain outside the claim; strace may report the generic
 `trace_incomplete` boundary where it can see them.

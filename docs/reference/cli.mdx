@@ -987,11 +987,22 @@ contain secrets. An unconsumed stream or an unobservable body adds
 `OPAQUE(http_body_unobserved)`.
 
 `--no-strace` is diagnostic only and always adds
-`OPAQUE(trace_incomplete)`. The worker receipt is not yet cryptographically
-bound to a parent MCP request scope: `task_id` / `request_id` / `execution_id`
-correlation is not a signed parent-child link. Native reads that bypass both
-the Python hook and the strace filter (`mmap`, `io_uring`, direct syscalls) and
-direct use of unpatched HTTP transports remain outside the claim.
+`OPAQUE(trace_incomplete)`. For `supervise`, every `tools/call` is forwarded
+with `params._meta.mareforma_scope_id`: an existing valid client value is kept,
+otherwise the supervisor generates `mcp_<uuid>`, rewrites the body and
+`Content-Length`, and returns `X-Mareforma-Scope-Id`. No client-side Mareforma
+code is required for this half of the chain. A successful response with exactly
+one valid `task_id` is signed into the CallReceipt as
+`dispatched_task_ids`. `verify_task_chain()` can then match that id against a
+worker receipt's signed `task_id` and `parent_scope_id`; the match uses ids and
+two HMACs, not a time window. The server must still persist the injected
+metadata, and the worker must receive it through `--parent-scope-id-env`
+(default `MAREFORMA_PARENT_SCOPE_ID`). A missing parent scope or task id, a
+conflicting set of task ids, or either bad signature remains `OPAQUE`;
+`task_id` / `request_id` / `execution_id` alone are correlation hints, not a
+signed parent-child link. Native reads that bypass
+both the Python hook and the strace filter (`mmap`, `io_uring`, direct syscalls)
+and direct use of unpatched HTTP transports remain outside the claim.
 
 ### mareforma-pro demo
 

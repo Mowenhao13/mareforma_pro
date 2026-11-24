@@ -1,6 +1,6 @@
 """Rootless, no-sudo observation extension for Mareforma."""
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from .backend import CollectorBackend, EvidenceBackend, InProcessBackend
 from .collector import RootlessCollector
@@ -65,8 +65,18 @@ from .mcp_receipts import (
     CALL_RECEIPT_SCHEMA,
     SESSION_RECEIPT_DOMAIN,
     SESSION_RECEIPT_SCHEMA,
+    TASK_CHAIN_VERDICT_SCHEMA,
+    TASK_CHAIN_LINKED,
+    TASK_CHAIN_CALL_RECEIPT_INVALID,
+    TASK_CHAIN_WORKER_RECEIPT_INVALID,
+    TASK_CHAIN_MISSING_GATEWAY_TASK_ID,
+    TASK_CHAIN_MISSING_WORKER_TASK_ID,
+    TASK_CHAIN_MISSING_WORKER_PARENT_SCOPE,
+    TASK_CHAIN_TASK_ID_MISMATCH,
+    TASK_CHAIN_PARENT_SCOPE_MISMATCH,
     CallReceipt,
     SessionReceipt,
+    TaskChainVerdict,
     build_call_receipt,
     build_session_receipt,
     receipt_digest,
@@ -74,6 +84,7 @@ from .mcp_receipts import (
     sign_payload,
     verify_call_receipt,
     verify_session_receipt,
+    verify_task_chain,
 )
 from .supervisor import MCPProcessSupervisor, WorkerConfig, rewrite_command_port
 from .task_context import TaskContextSpec
@@ -94,6 +105,16 @@ __all__ = [
     "CALL_RECEIPT_DOMAIN",
     "CALL_RECEIPT_SCHEMA",
     "CallReceipt",
+    "TASK_CHAIN_VERDICT_SCHEMA",
+    "TASK_CHAIN_LINKED",
+    "TASK_CHAIN_CALL_RECEIPT_INVALID",
+    "TASK_CHAIN_WORKER_RECEIPT_INVALID",
+    "TASK_CHAIN_MISSING_GATEWAY_TASK_ID",
+    "TASK_CHAIN_MISSING_WORKER_TASK_ID",
+    "TASK_CHAIN_MISSING_WORKER_PARENT_SCOPE",
+    "TASK_CHAIN_TASK_ID_MISMATCH",
+    "TASK_CHAIN_PARENT_SCOPE_MISMATCH",
+    "TaskChainVerdict",
     "CollectorBackend",
     "CollectorClient",
     "CollectorServer",
@@ -174,6 +195,7 @@ __all__ = [
     "verdict_or_opaque",
     "verify_call_receipt",
     "verify_session_receipt",
+    "verify_task_chain",
     "verify_and_verdict",
     "verify_scope_receipt",
     "verify_signature",

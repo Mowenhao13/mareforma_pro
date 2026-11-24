@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 from pathlib import Path
@@ -15,15 +16,24 @@ import pytest
 
 from mareforma_pro.egress import EgressProxy
 from mareforma_pro.errors import ReceiptError
+from mareforma_pro.collector import RootlessCollector
 from mareforma_pro.evidence import (
     OPAQUE_DB_UNINSPECTED,
     OPAQUE_UNMAPPED_TMPFS,
 )
 from mareforma_pro.mcp_receipts import (
+    TASK_CHAIN_CALL_RECEIPT_INVALID,
+    TASK_CHAIN_LINKED,
+    TASK_CHAIN_MISSING_GATEWAY_TASK_ID,
+    TASK_CHAIN_MISSING_WORKER_TASK_ID,
+    TASK_CHAIN_MISSING_WORKER_PARENT_SCOPE,
+    TASK_CHAIN_PARENT_SCOPE_MISMATCH,
+    TASK_CHAIN_TASK_ID_MISMATCH,
     build_call_receipt,
     build_session_receipt,
     verify_call_receipt,
     verify_session_receipt,
+    verify_task_chain,
 )
 from mareforma_pro.paths import MountResolver
 from mareforma_pro.strace import parse_strace
@@ -35,6 +45,9 @@ from mareforma_pro.supervisor import (
     MCPWorker,
     WorkerConfig,
     WorkerPool,
+    _body_has_scope,
+    _extract_dispatched_task_ids,
+    _inject_mcp_metadata,
     rewrite_command_port,
 )
 
@@ -209,6 +222,7 @@ def test_call_and_session_receipts_verify_and_reject_tamper():
         payload_digests=["sha256:" + "a" * 64],
     )
     assert verify_call_receipt(call.to_receipt_dict(), "secret").call_id == "call-1"
+    assert "dispatched_task_ids" not in call.to_receipt_dict()
     tampered = call.to_receipt_dict()
     tampered["observed_files"].append("/data/fake.csv")
     with pytest.raises(ReceiptError):
@@ -223,6 +237,303 @@ def test_call_and_session_receipts_verify_and_reject_tamper():
     bad["opaque_reasons"].append("fake")
     with pytest.raises(ReceiptError):
         verify_session_receipt(bad, "secret")
+
+
+def _worker_receipt(
+    *,
+    task_id: str = "task-1",
+    parent_scope_id: str | None = "scope-1",
+    secret: str = "secret",
+) -> dict:
+    collector = RootlessCollector(secret, receipt_ttl=3600.0)
+    scope_id = f"wrk:{task_id}"
+    collector.open_scope(
+        scope_id,
+        root_passthrough=True,
+        parent_scope_id=parent_scope_id,
+        task_id=task_id,
+        worker_id="worker-1",
+        execution_id="exec-1",
+        attempt="attempt-1",
+    )
+    return collector.close_scope(scope_id).to_receipt_dict()
+
+
+def test_dispatched_task_id_is_signed_into_the_call_receipt():
+    call = build_call_receipt(
+        call_id="call-task-1",
+        scope_id="scope-1",
+        secret="secret",
+        method="tools/call",
+        dispatched_task_ids=["task-1"],
+    )
+    payload = call.to_receipt_dict()
+    assert payload["dispatched_task_ids"] == ["task-1"]
+    assert verify_call_receipt(payload, "secret").dispatched_task_ids == ("task-1",)
+
+    tampered = dict(payload)
+    tampered["dispatched_task_ids"] = ["task-2"]
+    with pytest.raises(ReceiptError):
+        verify_call_receipt(tampered, "secret")
+
+
+def test_extract_dispatched_task_ids_reads_mcp_response_shapes():
+    task_id = "267da66a-eb78-4502-9f9b-9ddc80b358cd"
+    response = {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({"protocol": "biomni.task.v1", "task_id": task_id}),
+                }
+            ],
+            "structuredContent": {"task_id": task_id, "status": "queued"},
+            "isError": False,
+        },
+    }
+    assert _extract_dispatched_task_ids(json.dumps(response).encode()) == (task_id,)
+
+    conflicting = json.loads(json.dumps(response))
+    conflicting["result"]["content"][0]["text"] = json.dumps({"task_id": "task-other"})
+    assert _extract_dispatched_task_ids(json.dumps(conflicting).encode()) == ()
+
+    failed = json.loads(json.dumps(response))
+    failed["result"]["isError"] = True
+    assert _extract_dispatched_task_ids(json.dumps(failed).encode()) == ()
+    assert _extract_dispatched_task_ids(b"not-json") == ()
+    assert _extract_dispatched_task_ids(b"x" * (4 * 1024 * 1024 + 1)) == ()
+
+
+def test_supervisor_injects_scope_metadata_without_overwriting_client_values():
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "protein.query", "arguments": {}},
+    }
+    injected = _inject_mcp_metadata(
+        json.dumps(request).encode(),
+        scope_id="mcp_generated",
+        traceparent="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    )
+    meta = json.loads(injected)["params"]["_meta"]
+    assert meta["mareforma_scope_id"] == "mcp_generated"
+    assert meta["traceparent"].startswith("00-4bf92f")
+    assert _body_has_scope(injected, "mcp_generated")
+
+    client_scoped = {
+        **request,
+        "params": {
+            **request["params"],
+            "_meta": {"mareforma_scope_id": "mcp_client", "keep": "yes"},
+        },
+    }
+    preserved = _inject_mcp_metadata(
+        json.dumps(client_scoped).encode(),
+        scope_id="mcp_generated",
+    )
+    preserved_meta = json.loads(preserved)["params"]["_meta"]
+    assert preserved_meta == {"mareforma_scope_id": "mcp_client", "keep": "yes"}
+
+    not_a_tool_call = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {},
+    }
+    original = json.dumps(not_a_tool_call).encode()
+    assert _inject_mcp_metadata(original, scope_id="mcp_generated") == original
+
+
+def test_supervisor_signs_the_task_id_it_returns_to_the_client(tmp_path):
+    task_id = "267da66a-eb78-4502-9f9b-9ddc80b358cd"
+    received: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or "0")
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            received.append(payload)
+            if payload.get("method") != "tools/call":
+                self.send_response(400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": payload.get("id"),
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json.dumps(
+                                    {"protocol": "biomni.task.v1", "task_id": task_id}
+                                ),
+                            }
+                        ],
+                        "structuredContent": {
+                            "protocol": "biomni.task.v1",
+                            "task_id": task_id,
+                            "status": "queued",
+                        },
+                        "isError": False,
+                    },
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    upstream.daemon_threads = True
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    supervisor = MCPProcessSupervisor(
+        [sys.executable, "-c", "pass"],
+        secret="secret",
+        host="127.0.0.1",
+        port=0,
+        internal_host="127.0.0.1",
+        internal_port=upstream.server_address[1],
+        use_strace=False,
+        trace_dir=tmp_path / "trace",
+        receipt_log=tmp_path / "mcp-receipts.jsonl",
+    )
+    supervisor.workers[0].start = lambda: None  # type: ignore[method-assign]
+    supervisor.start()
+    try:
+        public_port = supervisor._httpd.server_address[1]  # type: ignore[union-attr]
+        conn = http.client.HTTPConnection("127.0.0.1", public_port, timeout=5)
+        try:
+            conn.request(
+                "POST",
+                "/mcp",
+                body=json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "biomni_invoke_tool",
+                            "arguments": {"tool_name": "protein.query"},
+                        },
+                    }
+                ),
+                headers={"Content-Type": "application/json"},
+            )
+            response = conn.getresponse()
+            response.read()
+            assert response.status == 200
+            response_scope = response.getheader("X-Mareforma-Scope-Id")
+        finally:
+            conn.close()
+        assert response_scope is not None
+        assert received[0]["params"]["_meta"]["mareforma_scope_id"] == response_scope
+        with supervisor._session_lock:
+            call = next(
+                receipt
+                for receipts in supervisor._sessions.values()
+                for receipt in receipts
+                if receipt.scope_id == response_scope
+            )
+        assert call.dispatched_task_ids == (task_id,)
+        worker = _worker_receipt(task_id=task_id, parent_scope_id=response_scope)
+        assert verify_task_chain(call.to_receipt_dict(), worker, "secret").linked
+    finally:
+        supervisor.stop()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=2)
+
+
+def test_task_chain_requires_both_signatures_and_matching_ids():
+    call = build_call_receipt(
+        call_id="call-task-1",
+        scope_id="scope-1",
+        secret="secret",
+        method="tools/call",
+        dispatched_task_ids=["task-1"],
+    )
+    worker = _worker_receipt(task_id="task-1", parent_scope_id="scope-1")
+    linked = verify_task_chain(call.to_receipt_dict(), worker, "secret")
+    assert linked.status == TASK_CHAIN_LINKED
+    assert linked.linked is True
+    assert linked.call_scope_id == "scope-1"
+    assert linked.call_task_ids == ("task-1",)
+    assert linked.worker_parent_scope_id == "scope-1"
+    assert linked.to_dict()["linked"] is True
+
+    no_gateway_task = build_call_receipt(
+        call_id="call-task-2",
+        scope_id="scope-1",
+        secret="secret",
+        method="tools/call",
+    )
+    verdict = verify_task_chain(no_gateway_task.to_receipt_dict(), worker, "secret")
+    assert verdict.status == TASK_CHAIN_MISSING_GATEWAY_TASK_ID
+    assert verdict.linked is False
+
+    verdict = verify_task_chain(
+        call.to_receipt_dict(),
+        _worker_receipt(task_id="task-1", parent_scope_id=None),
+        "secret",
+    )
+    assert verdict.status == TASK_CHAIN_MISSING_WORKER_PARENT_SCOPE
+
+    collector = RootlessCollector("secret", receipt_ttl=3600.0)
+    collector.open_scope("wrk:no-task", parent_scope_id="scope-1")
+    no_worker_task = collector.close_scope("wrk:no-task").to_receipt_dict()
+    verdict = verify_task_chain(call.to_receipt_dict(), no_worker_task, "secret")
+    assert verdict.status == TASK_CHAIN_MISSING_WORKER_TASK_ID
+
+    verdict = verify_task_chain(
+        call.to_receipt_dict(), _worker_receipt(task_id="task-2"), "secret"
+    )
+    assert verdict.status == TASK_CHAIN_TASK_ID_MISMATCH
+
+    verdict = verify_task_chain(
+        call.to_receipt_dict(),
+        _worker_receipt(task_id="task-1", parent_scope_id="scope-other"),
+        "secret",
+    )
+    assert verdict.status == TASK_CHAIN_PARENT_SCOPE_MISMATCH
+
+    tampered_call = call.to_receipt_dict()
+    tampered_call["dispatched_task_ids"] = ["task-1", "task-2"]
+    verdict = verify_task_chain(tampered_call, worker, "secret")
+    assert verdict.status == TASK_CHAIN_CALL_RECEIPT_INVALID
+
+    tampered_worker = dict(worker)
+    tampered_worker["parent_scope_id"] = "scope-other"
+    verdict = verify_task_chain(call.to_receipt_dict(), tampered_worker, "secret")
+    assert verdict.status.startswith("WORKER_RECEIPT_INVALID")
+
+
+def test_task_chain_can_verify_two_distinct_hmac_domains():
+    call = build_call_receipt(
+        call_id="call-task-1",
+        scope_id="scope-1",
+        secret="gateway-secret",
+        method="tools/call",
+        dispatched_task_ids=["task-1"],
+    )
+    worker = _worker_receipt(
+        task_id="task-1", parent_scope_id="scope-1", secret="worker-secret"
+    )
+    assert verify_task_chain(
+        call.to_receipt_dict(), worker, "gateway-secret", worker_secret="worker-secret"
+    ).linked
+    assert verify_task_chain(call.to_receipt_dict(), worker, "gateway-secret").status == (
+        "WORKER_RECEIPT_INVALID"
+    )
 
 
 def test_call_evidence_records_connect_and_embedded_db():

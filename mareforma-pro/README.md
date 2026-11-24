@@ -1,18 +1,26 @@
 # mareforma-pro
 
-`mareforma-pro` is the independently released, no-`sudo` observation extension
-for [Mareforma](https://github.com/mareforma/mareforma). It installs the import
-package `mareforma_pro` and the `mareforma-pro` command.
+`mareforma-pro` is an independent, open-source Python library and the upgraded
+observation stack for [Mareforma](https://github.com/mareforma/mareforma). It
+has its own distribution, its own `mareforma_pro` import package, its own
+`mareforma-pro` command, and its own version and release line. Install it on
+its own: packaging brings the Mareforma epistemic graph along as its engine, so
+one command gives you the full stack.
 
 ```bash
 uv add mareforma-pro
 ```
 
-The distribution depends on the core `mareforma` package. Use it when the host
-does not grant `sudo`, CAP_BPF, or a writable cgroup subtree.
+Compared with core `mareforma`, `mareforma-pro` upgrades observation from a
+single Python process to the host and to the boundaries a Python audit hook
+cannot see: unprivileged `strace + bwrap` and FUSE read evidence, a long-running
+HTTP MCP supervisor, task-scoped worker receipts, egress and database probes,
+and OTel export. It needs no `sudo`, CAP_BPF, or writable cgroup subtree.
+`mareforma-pro` is MIT-licensed.
 
-Releases use the independent tag namespace `mareforma-pro-vX.Y.Z` and publish
-only this project. Core `mareforma` releases keep the `vX.Y.Z` tag namespace.
+`mareforma-pro` is versioned and released independently: releases use the
+`mareforma-pro-vX.Y.Z` tag namespace and publish only this project. Core
+`mareforma` releases keep the `vX.Y.Z` tag namespace.
 
 ## Transports
 
@@ -217,10 +225,34 @@ presigned URLs commonly carry credentials; `--http-query-text` opts into the
 plaintext query and is not recommended for signed receipts. `--no-strace` is a
 diagnostic mode and always adds `OPAQUE(trace_incomplete)`.
 
-The worker's task receipt does not yet cryptographically bind to the MCP
-request's parent scope. Without a parent `scope_id` in the task environment, it
-can only be correlated through `task_id`, `request_id`, `execution_id`, and
-time. Do not present that correlation as a signed parent-child link.
+### Two-link MCP-to-worker parent binding (0.6.0+)
+
+The supervisor and worker now sign the two halves of a parent link. For a
+successful MCP `tools/call`, the supervisor extracts one `task_id` from
+`result.task_id`, `result.structuredContent.task_id`, or a JSON object in
+`result.content[*].text`, then signs it into
+`CallReceipt.dispatched_task_ids`. The worker signs `task_id` and the parent
+scope it received through its configured parent-scope environment variable.
+
+```python
+from mareforma_pro import verify_task_chain
+
+verdict = verify_task_chain(call_receipt, worker_receipt, secret)
+if verdict.linked:
+    # WorkerReceipt.parent_scope_id == CallReceipt.scope_id
+    # and WorkerReceipt.task_id is in CallReceipt.dispatched_task_ids.
+    parent_scope = verdict.call_scope_id
+```
+
+`verify_task_chain()` verifies both HMACs before comparing either id. Pass
+`worker_secret=` when the worker collector uses a different secret. Matching
+does not use `started_at`, `closed_at`, or any time window. The application
+still has to propagate the MCP request's `scope_id` into the worker as
+`MAREFORMA_PARENT_SCOPE_ID` (or the configured `--parent-scope-id-env`); without
+that signed parent field, the result remains an explicit non-link. A response
+with zero or multiple distinct task ids also contributes no id. Treat every
+status other than `LINKED` as `OPAQUE`; never upgrade a missing half from
+`task_id`/`request_id`/`execution_id` correlation alone.
 
 ## Grounding scope, not a truth score
 

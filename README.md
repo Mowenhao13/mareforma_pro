@@ -152,18 +152,27 @@ The claim now carries `GROUNDED` as a computed fact, not a self-reported label. 
 ## Install
 
 ```bash
-uv add mareforma
-mareforma bootstrap   # optional: sign your claims and enable the public log
+uv add mareforma        # core epistemic graph
+uv add mareforma-pro    # upgraded observation library (brings the graph with it)
+mareforma bootstrap     # optional: sign your claims and enable the public log
 ```
 
-## Rootless observation (`mareforma-pro`)
+## `mareforma-pro`: the upgraded observation library
 
-For hosts where the user cannot obtain `sudo`, CAP_BPF, or a writable cgroup
-subtree, the separately released [`mareforma-pro`](https://pypi.org/project/mareforma-pro/)
-distribution provides the `mareforma_pro` import package and a lower-assurance
-but fully user-space path. It depends on the core `mareforma` distribution and
-is versioned independently; releases use the `mareforma-pro-vX.Y.Z` tag
-namespace. Build, release, and verification details are in
+[`mareforma-pro`](https://pypi.org/project/mareforma-pro/) is an independent,
+open-source Python library, with its own distribution, its own `mareforma_pro`
+import package, its own `mareforma-pro` command, and its own
+`mareforma-pro-vX.Y.Z` release line. Install it on its own — packaging brings
+the Mareforma epistemic graph along as its engine — so one
+`uv add mareforma-pro` gives you the full stack.
+
+It is the upgrade over core `mareforma` for observation. Where the core library
+observes one Python process, `mareforma-pro` extends coverage to the host and
+to the process boundaries a Python audit hook cannot see: unprivileged
+`strace + bwrap` and FUSE read evidence, a long-running HTTP MCP supervisor,
+task-scoped worker receipts, egress and database probes, and OTel export. It
+needs no `sudo`, CAP_BPF, or writable cgroup subtree, and no eBPF or Tetragon.
+Build, release, and verification details are in
 [Package distributions](https://docs.mareforma.com/reference/distributions).
 
 ```bash
@@ -339,9 +348,13 @@ options; Biomni-style names are not built into Mareforma. The receipt binds
 the task/execution/attempt ids and adds `observed_http` rows (method, status,
 response bytes and SHA-256, credential-free URL, query digest), DB commands
 for SQLite/psycopg/Redis, and the file/temp-file read evidence. Task
-correlation to an MCP request remains logical (`task_id` / `request_id` /
-time), not a cryptographic parent link, until the worker receives a parent
-scope id from the application.
+receipts can now form a cryptographic two-link chain with the MCP request:
+the supervisor signs the `tools/call` response's unique `task_id` into
+`CallReceipt.dispatched_task_ids`, and `verify_task_chain()` checks that id
+and the worker's signed `parent_scope_id` against the gateway receipt. No time
+window is used. The application must still pass the request scope into the
+worker; a missing parent scope, missing gateway task id, conflicting task ids,
+or either bad HMAC remains `OPAQUE`, not an inferred link.
 
 ## Capabilities
 

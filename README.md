@@ -1,33 +1,33 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mareforma/mareforma/main/assets/mareforma-wordmark-dark.svg">
-    <img alt="Mareforma" src="https://raw.githubusercontent.com/mareforma/mareforma/main/assets/mareforma-wordmark.svg" width="420">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Mowenhao13/mareforma_pro/main/assets/mareforma-pro-wordmark-dark.svg">
+    <img alt="Mareforma Pro" src="https://raw.githubusercontent.com/Mowenhao13/mareforma_pro/main/assets/mareforma-pro-wordmark.svg" width="560">
   </picture>
 </p>
 
 <p align="center">
   <strong>Where AI discovery becomes science</strong>
   <br>
-  <sub>trust earned, not declared · uses real data · effectively independent · publicly verifiable · local-first</sub>
+  <sub>mareforma-pro · the upgraded observation library · trust earned, not declared · uses real data · effectively independent · publicly verifiable · local-first</sub>
 </p>
 
 <p align="center">
   <a href="https://docs.mareforma.com/introduction/quickstart">Quickstart</a> &nbsp;·&nbsp;
   <a href="https://docs.mareforma.com">Docs</a> &nbsp;·&nbsp;
-  <a href="https://github.com/mareforma/mareforma/tree/main/examples/">Examples</a>
+  <a href="https://github.com/Mowenhao13/mareforma_pro/tree/main/examples/">Examples</a>
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/mareforma/"><img src="https://img.shields.io/pypi/v/mareforma" alt="PyPI"></a>
   <a href="https://pypi.org/project/mareforma-pro/"><img src="https://img.shields.io/pypi/v/mareforma-pro" alt="mareforma-pro PyPI"></a>
-  <a href="https://pypi.org/project/mareforma/"><img src="https://img.shields.io/pypi/pyversions/mareforma" alt="Python"></a>
-  <a href="https://github.com/mareforma/mareforma/actions/workflows/tests.yml"><img src="https://github.com/mareforma/mareforma/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="https://pypi.org/project/mareforma/"><img src="https://img.shields.io/pypi/v/mareforma" alt="mareforma PyPI"></a>
+  <a href="https://pypi.org/project/mareforma-pro/"><img src="https://img.shields.io/pypi/pyversions/mareforma-pro" alt="Python"></a>
+  <a href="https://github.com/Mowenhao13/mareforma_pro/actions/workflows/tests.yml"><img src="https://github.com/Mowenhao13/mareforma_pro/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
 <hr>
 
-Mareforma is a local-first library where AI scientists record their findings as claims. Each claim cites the claims it builds on and can contradict others, forming a knowledge graph. Trust is read from that graph, not from the agents' self-reported confidence.
+Mareforma Pro is the independent, open-source Python library for verified AI-assisted research. Findings are claims in a local knowledge graph; each claim cites what it builds on, and trust is read from that graph rather than from the agent's self-reported confidence. It ships the Mareforma epistemic graph as its engine and upgrades observation from a single Python process to the host and the process boundaries a Python audit hook cannot see.
 
 ## The silent failure it catches
 
@@ -80,7 +80,7 @@ Run it under the observer. `diagnose` runs your program and records every file i
 uvx mareforma diagnose --cites notes/cell_counts.md -- python ask.py
 ```
 
-Mareforma prints your pipeline's answer, then its own report below it:
+The command prints your pipeline's answer, then its own report below it:
 
 <pre>
 FINDING: The human brain has about 86 billion neurons, as stated in the notes. [...]
@@ -147,17 +147,18 @@ recorded claim 75e4cbe5-f77a-45c0-9c00-57c065d83c90
 grounding: GROUNDED
 </pre>
 
-The claim now carries `GROUNDED` as a computed fact, not a self-reported label. The same run records which model authored the finding, computed from the request that was actually sent; a local model is identified by the sha256 digest of the weights that served it, not by the name it reports. [Example 02](https://github.com/mareforma/mareforma/tree/main/examples/02_compounding_agents/) runs this catch end to end.
+The claim now carries `GROUNDED` as a computed fact, not a self-reported label. The same run records which model authored the finding, computed from the request that was actually sent; a local model is identified by the sha256 digest of the weights that served it, not by the name it reports. [Example 02](https://github.com/Mowenhao13/mareforma_pro/tree/main/examples/02_compounding_agents/) runs this catch end to end.
 
 ## Install
 
 ```bash
-uv add mareforma        # core epistemic graph
-uv add mareforma-pro    # upgraded observation library (brings the graph with it)
+uv add mareforma-pro    # the upgraded observation library (brings the graph with it)
 mareforma bootstrap     # optional: sign your claims and enable the public log
 ```
 
-## `mareforma-pro`: the upgraded observation library
+Use `uv add mareforma` alone if you only need the core epistemic graph.
+
+## Independent release, and an upgrade
 
 [`mareforma-pro`](https://pypi.org/project/mareforma-pro/) is an independent,
 open-source Python library, with its own distribution, its own `mareforma_pro`
@@ -174,10 +175,6 @@ task-scoped worker receipts, egress and database probes, and OTel export. It
 needs no `sudo`, CAP_BPF, or writable cgroup subtree, and no eBPF or Tetragon.
 Build, release, and verification details are in
 [Package distributions](https://docs.mareforma.com/reference/distributions).
-
-```bash
-uv add mareforma-pro
-```
 
 The published wheel filename is normalized to `mareforma_pro-*.whl`; the
 distribution metadata is still `Name: mareforma-pro`, and the import is
@@ -382,18 +379,18 @@ Classification stays a secondary label the agent declares: `INFERRED` (model rea
 
 | | Example | What it shows |
 |---|---|---|
-| 01 | [API Walkthrough](https://github.com/mareforma/mareforma/tree/main/examples/01_api_walkthrough/) | The full API in one runnable script |
-| 02 | [Compounding Agents](https://github.com/mareforma/mareforma/tree/main/examples/02_compounding_agents/) | The absence catch and computed independence, run end to end |
-| 03 | [Documented Contestation](https://github.com/mareforma/mareforma/tree/main/examples/03_documented_contestation/) | An agent challenges established consensus |
-| 04 | [Private Data, Public Findings](https://github.com/mareforma/mareforma/tree/main/examples/04_private_data_public_findings/) | Two labs share how they reached a finding without sharing the data |
-| 05 | [Drug Target Provenance](https://github.com/mareforma/mareforma/tree/main/examples/05_drug_target_provenance/) | A real research agent that labels which findings come from real data and which from the model's guess |
-| 06 | [Verify in CI](https://github.com/mareforma/mareforma/tree/main/examples/06_ci_verify/) | `mareforma verify` as a GitHub Actions gate, keyed on exit codes |
-| 07 | [Silent Failure Catch](https://github.com/mareforma/mareforma/tree/main/examples/07_silent_failure_catch/) | Two pipelines print the same number; one read the data. `pip install` plus one command, no model |
+| 01 | [API Walkthrough](https://github.com/Mowenhao13/mareforma_pro/tree/main/examples/01_api_walkthrough/) | The full API in one runnable script |
+| 02 | [Compounding Agents](https://github.com/Mowenhao13/mareforma_pro/tree/main/examples/02_compounding_agents/) | The absence catch and computed independence, run end to end |
+| 03 | [Documented Contestation](https://github.com/Mowenhao13/mareforma_pro/tree/main/examples/03_documented_contestation/) | An agent challenges established consensus |
+| 04 | [Private Data, Public Findings](https://github.com/Mowenhao13/mareforma_pro/tree/main/examples/04_private_data_public_findings/) | Two labs share how they reached a finding without sharing the data |
+| 05 | [Drug Target Provenance](https://github.com/Mowenhao13/mareforma_pro/tree/main/examples/05_drug_target_provenance/) | A real research agent that labels which findings come from real data and which from the model's guess |
+| 06 | [Verify in CI](https://github.com/Mowenhao13/mareforma_pro/tree/main/examples/06_ci_verify/) | `mareforma verify` as a GitHub Actions gate, keyed on exit codes |
+| 07 | [Silent Failure Catch](https://github.com/Mowenhao13/mareforma_pro/tree/main/examples/07_silent_failure_catch/) | Two pipelines print the same number; one read the data. `pip install` plus one command, no model |
 
 <hr>
 
-[`AGENTS.md`](https://github.com/mareforma/mareforma/blob/main/AGENTS.md): execution contract and adapters &nbsp;·&nbsp;
-[`ARCHITECTURE.md`](https://github.com/mareforma/mareforma/blob/main/ARCHITECTURE.md): system design &nbsp;·&nbsp;
-[`SECURITY.md`](https://github.com/mareforma/mareforma/blob/main/SECURITY.md): threat model &nbsp;·&nbsp;
-[`CONTRIBUTING.md`](https://github.com/mareforma/mareforma/blob/main/CONTRIBUTING.md): dev workflow &nbsp;·&nbsp;
-[`CHANGELOG.md`](https://github.com/mareforma/mareforma/blob/main/CHANGELOG.md): releases
+[`AGENTS.md`](https://github.com/Mowenhao13/mareforma_pro/blob/main/AGENTS.md): execution contract and adapters &nbsp;·&nbsp;
+[`ARCHITECTURE.md`](https://github.com/Mowenhao13/mareforma_pro/blob/main/ARCHITECTURE.md): system design &nbsp;·&nbsp;
+[`SECURITY.md`](https://github.com/Mowenhao13/mareforma_pro/blob/main/SECURITY.md): threat model &nbsp;·&nbsp;
+[`CONTRIBUTING.md`](https://github.com/Mowenhao13/mareforma_pro/blob/main/CONTRIBUTING.md): dev workflow &nbsp;·&nbsp;
+[`CHANGELOG.md`](https://github.com/Mowenhao13/mareforma_pro/blob/main/CHANGELOG.md): releases
